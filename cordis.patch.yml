@@ -1,0 +1,5 @@
+# dsh-ipcalc bundle patch: mounts this plugin into the profile as one layer row.
+# No configuration options yet; defaults live in the plugin schema.
+- insert:
+    - id: ipcalc
+      name: dsh-ipcalc
