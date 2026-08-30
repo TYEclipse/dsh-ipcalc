@@ -32,8 +32,130 @@ export interface ParsedV6 {
 
 const HEXTET_RE = /^[0-9a-f]{1,4}$/
 
+const V6_MAX = (1n << 128n) - 1n
+
 function hex2(value: number): string {
   return value.toString(16).padStart(4, '0')
+}
+
+/** Convert eight hextets to their 128-bit integer value (exact BigInt). */
+export function v6ToBigInt(hextets: number[]): bigint {
+  let value = 0n
+  for (const hextet of hextets) value = (value << 16n) | BigInt(hextet)
+  return value
+}
+
+/** Convert a 128-bit BigInt back to eight hextets (index 0 = highest). */
+export function bigIntToHextets(value: bigint): number[] {
+  const hextets: number[] = []
+  let cursor = value
+  for (let i = 7; i >= 0; i--) {
+    hextets[i] = Number(cursor & 0xffffn)
+    cursor >>= 16n
+  }
+  return hextets
+}
+
+/** A parsed IPv6 CIDR: address plus prefix length. */
+export interface V6CidrSpec {
+  parsed: ParsedV6
+  prefix: number
+}
+
+/**
+ * Parse an IPv6 CIDR string: "addr/prefix" with a numeric 0-128 prefix,
+ * or a bare address treated as /128. Returns null when invalid.
+ */
+export function parseV6Cidr(text: string): V6CidrSpec | null {
+  const trimmed = text.trim()
+  if (trimmed === '') return null
+  let address = trimmed
+  let prefix = 128
+  if (trimmed.includes('/')) {
+    const pieces = trimmed.split('/')
+    if (pieces.length !== 2 || pieces[0] === '' || pieces[1] === '') return null
+    if (!/^[0-9]{1,3}$/.test(pieces[1]!)) return null
+    prefix = Number(pieces[1])
+    if (prefix > 128) return null
+    address = pieces[0]!
+  }
+  const parsed = parseV6(address)
+  if (parsed === null) return null
+  return { parsed, prefix }
+}
+
+/** First and last address values (128-bit) covered by an IPv6 CIDR. */
+export function v6RangeOf(spec: V6CidrSpec): { network: bigint; last: bigint } {
+  const address = v6ToBigInt(spec.parsed.hextets)
+  const hostBits = 128n - BigInt(spec.prefix)
+  const mask = hostBits === 0n ? V6_MAX : (V6_MAX << hostBits) & V6_MAX
+  const network = address & mask
+  const last = network | (V6_MAX >> BigInt(spec.prefix))
+  return { network, last }
+}
+
+/** Full IPv6 subnet details for a parsed CIDR. */
+export interface V6SubnetInfo {
+  cidr: string
+  network: string
+  network_full: string
+  last: string
+  prefix: number
+  first_host: string
+  last_host: string
+  addresses: string
+  usable_hosts: string
+  network_class: V6Class
+  note?: string
+}
+
+/**
+ * Compute the complete subnet layout for an IPv6 CIDR. Address counts are
+ * returned as decimal strings because they exceed Number.MAX_SAFE_INTEGER.
+ * /127 follows RFC 6164 (both addresses usable on point-to-point links);
+ * /128 is a single host.
+ */
+export function v6SubnetOf(spec: V6CidrSpec): V6SubnetInfo {
+  const { prefix } = spec
+  const { network, last } = v6RangeOf(spec)
+  const hostBits = 128n - BigInt(prefix)
+  const addresses = 1n << hostBits
+
+  let firstHost: bigint
+  let lastHost: bigint
+  let usable: bigint
+  let note: string | undefined
+  if (prefix === 128) {
+    firstHost = network
+    lastHost = network
+    usable = 1n
+    note = 'single host'
+  } else if (prefix === 127) {
+    firstHost = network
+    lastHost = last
+    usable = 2n
+    note = 'RFC 6164: both addresses are usable on point-to-point links'
+  } else {
+    firstHost = network + 1n
+    lastHost = last - 1n
+    usable = addresses - 2n
+  }
+
+  const networkHextets = bigIntToHextets(network)
+  const info: V6SubnetInfo = {
+    cidr: `${normalizeV6(networkHextets)}/${prefix}`,
+    network: normalizeV6(networkHextets),
+    network_full: networkHextets.map(hex2).join(':'),
+    last: normalizeV6(bigIntToHextets(last)),
+    prefix,
+    first_host: normalizeV6(bigIntToHextets(firstHost)),
+    last_host: normalizeV6(bigIntToHextets(lastHost)),
+    addresses: addresses.toString(),
+    usable_hosts: usable.toString(),
+    network_class: classifyV6(networkHextets),
+  }
+  if (note !== undefined) info.note = note
+  return info
 }
 
 /** Find the longest run of zero hextets; leftmost wins ties. */

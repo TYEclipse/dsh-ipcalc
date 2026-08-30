@@ -6,8 +6,8 @@
  * @module dsh-ipcalc/tools
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { classifyV4, parseCidr, subnetOf, summarizeSpecs, } from "./ipv4.js";
-import { parseV6 } from "./ipv6.js";
+import { classifyV4, parseCidr, parseV4, subnetOf, summarizeSpecs, } from "./ipv4.js";
+import { bigIntToHextets, normalizeV6, parseV6, parseV6Cidr, v6RangeOf, v6SubnetOf, v6ToBigInt, } from "./ipv6.js";
 const V4_CLASSES = [
     'unspecified', 'broadcast', 'loopback', 'private', 'cgnat', 'link_local',
     'documentation', 'multicast', 'reserved', 'global',
@@ -35,6 +35,26 @@ function okSubnet(input, spec) {
         broadcast_integer: info.broadcast_integer,
         network_class: info.network_class,
         host_class: info.host_class,
+    };
+    if (info.note !== undefined)
+        result.note = info.note;
+    return result;
+}
+function okV6Subnet(input, spec) {
+    const info = v6SubnetOf(spec);
+    const result = {
+        valid: true,
+        input,
+        cidr: info.cidr,
+        network: info.network,
+        network_full: info.network_full,
+        last: info.last,
+        prefix: info.prefix,
+        first_host: info.first_host,
+        last_host: info.last_host,
+        addresses: info.addresses,
+        usable_hosts: info.usable_hosts,
+        network_class: info.network_class,
     };
     if (info.note !== undefined)
         result.note = info.note;
@@ -69,6 +89,27 @@ function renderIpParse(value) {
         ? `octets [${(result.octets ?? []).join('.')}] = ${result.integer}`
         : `${result.full}${result.embedded_ipv4 !== undefined ? ` (embeds ${result.embedded_ipv4})` : ''}`;
     return `${result.input} → IPv${result.version}, class ${result.class}, normalized ${result.normalized}\n  ${detail}`;
+}
+function renderV6Subnet(value) {
+    const result = value;
+    if (!result.valid || result.cidr === undefined) {
+        return `invalid input: ${result.reason ?? 'unknown error'}`;
+    }
+    const lines = [
+        `${result.input} → network ${result.cidr}`,
+        `  range ${result.first_host} – ${result.last_host}  (${result.usable_hosts} usable of ${result.addresses})`,
+        `  class ${result.network_class}  full ${result.network_full}`,
+    ];
+    if (result.note !== undefined)
+        lines.push(`  note: ${result.note}`);
+    return lines.join('\n');
+}
+function renderIpMatch(value) {
+    const result = value;
+    if (!result.valid)
+        return `invalid input: ${result.reason ?? 'unknown error'}`;
+    const verdict = result.in_subnet === true ? 'INSIDE' : 'OUTSIDE';
+    return `${result.ip} is ${verdict} ${result.cidr} (IPv${result.cidr_version})\n  network ${result.network} – ${result.last}`;
 }
 /** Build the three ipcalc tool definitions. */
 export function buildIpcalcTools() {
@@ -241,6 +282,126 @@ export function buildIpcalcTools() {
             return { valid: false, input, reason: 'not a valid IPv4 or IPv6 address' };
         },
     });
-    return { ipv4_subnet, ipv4_summarize, ip_parse };
+    const ipv6_subnet = defineTool({
+        name: 'ipv6_subnet',
+        description: 'Compute the complete subnet layout for an IPv6 address in CIDR notation '
+            + '(e.g. "2001:db8:1234::1/64" or a bare address treated as /128): network address, '
+            + 'first/last usable host, exact address counts as decimal strings (128-bit BigInt math, '
+            + 'counts can exceed 2^53), RFC 5952 canonical forms and the IANA address class. '
+            + '/127 follows RFC 6164 (both addresses usable). Pure local math, no network access. '
+            + 'Use this instead of doing IPv6 subnet arithmetic in your head.',
+        parameters: {
+            cidr: { type: 'string', required: true, description: 'IPv6 CIDR to analyze: "addr/prefix" with a numeric prefix 0–128, or a bare IPv6 address (treated as /128).' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    input: { type: 'string', required: true },
+                    cidr: { type: 'string' },
+                    network: { type: 'string' },
+                    network_full: { type: 'string' },
+                    last: { type: 'string' },
+                    prefix: { type: 'number' },
+                    first_host: { type: 'string' },
+                    last_host: { type: 'string' },
+                    addresses: { type: 'string' },
+                    usable_hosts: { type: 'string' },
+                    network_class: { type: 'string', enum: [...V6_CLASSES] },
+                    note: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderV6Subnet(value) }],
+        },
+        async execute(args) {
+            const spec = parseV6Cidr(args.cidr);
+            if (spec === null) {
+                return { valid: false, input: args.cidr, reason: 'not a valid IPv6 CIDR (expected addr/prefix with a numeric prefix 0–128, or a bare IPv6 address)' };
+            }
+            return okV6Subnet(args.cidr, spec);
+        },
+    });
+    const ip_match = defineTool({
+        name: 'ip_match',
+        description: 'Test whether a bare IP address (IPv4 or IPv6) belongs to a CIDR range, '
+            + 'e.g. ip "192.168.1.5" vs cidr "192.168.1.0/24", or "2001:db8::5" vs "2001:db8::/32". '
+            + 'Reports membership plus the normalized network range; mixed-version input is rejected '
+            + 'with a reason. Pure local math, no network access.',
+        parameters: {
+            ip: { type: 'string', required: true, description: 'The bare IP address to test (no CIDR notation).' },
+            cidr: { type: 'string', required: true, description: 'The IPv4 or IPv6 CIDR range to test against.' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    in_subnet: { type: 'boolean' },
+                    ip: { type: 'string' },
+                    ip_version: { type: 'number', enum: [4, 6] },
+                    cidr: { type: 'string' },
+                    cidr_version: { type: 'number', enum: [4, 6] },
+                    network: { type: 'string' },
+                    last: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderIpMatch(value) }],
+        },
+        async execute(args) {
+            const ipInput = args.ip.trim();
+            const cidrInput = args.cidr.trim();
+            const v4Ip = parseV4(ipInput);
+            const v6Ip = parseV6(ipInput);
+            const v4Cidr = parseCidr(cidrInput);
+            const v6Cidr = parseV6Cidr(cidrInput);
+            if (v4Ip === null && v6Ip === null) {
+                return { valid: false, reason: `"${ipInput}" is not a valid bare IPv4 or IPv6 address (CIDR notation is not allowed here)` };
+            }
+            if (v4Cidr === null && v6Cidr === null) {
+                return { valid: false, reason: `"${cidrInput}" is not a valid IPv4 or IPv6 CIDR` };
+            }
+            const ipVersion = v4Ip !== null ? 4 : 6;
+            const cidrVersion = v4Cidr !== null ? 4 : 6;
+            if (ipVersion !== cidrVersion) {
+                return { valid: false, reason: `version mismatch: ip is IPv${ipVersion} but cidr is IPv${cidrVersion}` };
+            }
+            if (v4Ip !== null && v4Cidr !== null) {
+                const subnet = subnetOf(v4Cidr);
+                const inside = v4Ip.integer >= subnet.network_integer && v4Ip.integer <= subnet.broadcast_integer;
+                return {
+                    valid: true,
+                    in_subnet: inside,
+                    ip: v4Ip.text,
+                    ip_version: 4,
+                    cidr: subnet.cidr,
+                    cidr_version: 4,
+                    network: subnet.network,
+                    last: subnet.broadcast,
+                };
+            }
+            const ipParsed = v6Ip;
+            const cidrParsed = v6Cidr;
+            const range = v6RangeOf(cidrParsed);
+            const address = v6ToBigInt(ipParsed.hextets);
+            const inside = address >= range.network && address <= range.last;
+            const networkHextets = bigIntToHextets(range.network);
+            return {
+                valid: true,
+                in_subnet: inside,
+                ip: ipParsed.normalized,
+                ip_version: 6,
+                cidr: `${normalizeV6(networkHextets)}/${cidrParsed.prefix}`,
+                cidr_version: 6,
+                network: normalizeV6(networkHextets),
+                last: normalizeV6(bigIntToHextets(range.last)),
+            };
+        },
+    });
+    return { ipv4_subnet, ipv4_summarize, ip_parse, ipv6_subnet, ip_match };
 }
 //# sourceMappingURL=tools.js.map
