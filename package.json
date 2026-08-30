@@ -1,7 +1,7 @@
 {
   "name": "dsh-ipcalc",
-  "version": "0.1.0",
-  "description": "IP & subnet math toolbox for DeepSeek Harness (dsh): IPv4 subnet layouts, CIDR summarization and IPv4/IPv6 parsing with RFC 5952 normalization and IANA classification — zero runtime dependencies, pure local math",
+  "version": "0.2.0",
+  "description": "IP & subnet math toolbox for DeepSeek Harness (dsh): IPv4 subnet layouts, CIDR summarization, IPv6 subnet math (128-bit exact) and IPv4/IPv6 parsing with RFC 5952 normalization and IANA classification — zero runtime dependencies, pure local math",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

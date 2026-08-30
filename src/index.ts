@@ -1,13 +1,17 @@
 /**
  * dsh-ipcalc — IP & subnet math toolbox for DeepSeek Harness.
  *
- * Three pure-math tools, zero runtime dependencies, no network I/O:
- *   ipv4_subnet     — full subnet layout (network/broadcast/mask/hosts/classes)
+ * Five pure-math tools, zero runtime dependencies, no network I/O:
+ *   ipv4_subnet     — full IPv4 subnet layout (network/broadcast/mask/hosts/classes)
  *   ipv4_summarize  — minimal covering CIDR list for a set of addresses/ranges
  *   ip_parse        — validate, normalize (RFC 5952) and classify IPv4/IPv6
+ *   ipv6_subnet     — full IPv6 subnet layout (128-bit BigInt math, exact counts)
+ *   ip_match        — membership test of a bare IP against an IPv4/IPv6 CIDR
  *
- * All arithmetic is exact double math on 32-bit integers, so no bitwise
- * overflow can occur. /31 networks follow RFC 3021.
+ * All IPv4 arithmetic is exact double math on 32-bit integers, so no bitwise
+ * overflow can occur (/31 networks follow RFC 3021). All IPv6 subnet math
+ * uses BigInt for exact 128-bit arithmetic (/127 follows RFC 6164); address
+ * counts are returned as decimal strings because they exceed 2^53.
  *
  * @module dsh-ipcalc
  */
