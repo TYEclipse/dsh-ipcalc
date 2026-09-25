@@ -1,6 +1,12 @@
 /**
  * Tests for the dsh-ipcalc tool definitions, execute branches and
  * text renderers.
+ *
+ * ORACLE: test/oracle/anchors.py
+ *
+ * The numeric anchors in this file (section "O" of the oracle) are produced by
+ * the independent Python implementation (stdlib `ipaddress`), not by mental
+ * arithmetic — reproduce with `python3 test/oracle/anchors.py`.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -21,8 +27,8 @@ function assertNoUndefined(value: unknown, path: string): void {
 }
 
 describe('buildIpcalcTools', () => {
-  it('exposes all five tools under their canonical names', () => {
-    expect(Object.keys(tools).sort()).toEqual(['ip_match', 'ip_parse', 'ipv4_subnet', 'ipv4_summarize', 'ipv6_subnet'].sort())
+  it('exposes all seven tools under their canonical names', () => {
+    expect(Object.keys(tools).sort()).toEqual(['ip_match', 'ip_parse', 'ipv4_range', 'ipv4_split', 'ipv4_subnet', 'ipv4_summarize', 'ipv6_subnet'].sort())
   })
 
   it('gives every tool a name, description, schema and executable', () => {

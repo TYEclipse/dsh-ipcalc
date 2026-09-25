@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-ipcalc: three pure-math tools exposed to every
+ * Tool definitions for dsh-ipcalc: seven pure-math tools exposed to every
  * agent via defineTool. Each tool has a strict JSON-schema parameter
  * surface and a compact text renderer. No network I/O happens anywhere.
  *
@@ -11,10 +11,16 @@ import { type V6Class } from './ipv6.ts';
 export interface ToolSet {
     ipv4_subnet: ToolDefinition;
     ipv4_summarize: ToolDefinition;
+    ipv4_split: ToolDefinition;
+    ipv4_range: ToolDefinition;
     ip_parse: ToolDefinition;
     ipv6_subnet: ToolDefinition;
     ip_match: ToolDefinition;
 }
+/** Maximum number of subnets ipv4_split returns in one call. */
+export declare const SPLIT_LIMIT = 256;
+/** Number of subnet lines the ipv4_split renderer prints before eliding. */
+export declare const SPLIT_RENDER_CAP = 12;
 /** The full output of ipv4_subnet on success (every key always present). */
 export interface SubnetResult {
     valid: boolean;
@@ -43,6 +49,33 @@ export interface SummarizeResult {
     input_count?: number;
     output_count?: number;
     addresses_covered?: number;
+    reason?: string;
+}
+/** The full output of ipv4_split (every key always present on success). */
+export interface SplitResult {
+    valid: boolean;
+    input: string;
+    cidr?: string;
+    source_prefix?: number;
+    new_prefix?: number;
+    count?: number;
+    addresses_each?: number;
+    usable_each?: number;
+    cidrs?: string[];
+    first?: string;
+    last?: string;
+    note?: string;
+    reason?: string;
+}
+/** The full output of ipv4_range (every key always present on success). */
+export interface RangeResult {
+    valid: boolean;
+    start?: string;
+    end?: string;
+    cidrs?: string[];
+    count?: number;
+    addresses_covered?: number;
+    note?: string;
     reason?: string;
 }
 /** The full output of ip_parse (only relevant keys are set per branch). */

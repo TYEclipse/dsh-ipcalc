@@ -209,6 +209,25 @@ export function subnetOf(spec: CidrSpec): SubnetInfo {
   return info
 }
 
+/** Usable host count for a prefix, honoring RFC 3021 (/31) and /32 hosts. */
+export function usableHostsForPrefix(prefix: number): number {
+  if (prefix === 32) return 1
+  if (prefix === 31) return 2
+  return 2 ** (32 - prefix) - 2
+}
+
+/** Split a CIDR into the equal subnets of a longer prefix (network-aligned). */
+export function splitSpec(spec: CidrSpec, newPrefix: number): string[] {
+  const base = subnetOf(spec).network_integer
+  const step = 2 ** (32 - newPrefix)
+  const count = 2 ** (newPrefix - spec.prefix)
+  const out: string[] = []
+  for (let index = 0; index < count; index++) {
+    out.push(`${formatV4(base + index * step)}/${newPrefix}`)
+  }
+  return out
+}
+
 /** Merge a list of integer ranges into maximal contiguous runs. */
 export function mergeRanges(ranges: Array<[number, number]>): Array<[number, number]> {
   const sorted = [...ranges].sort((a, b) => a[0] - b[0])

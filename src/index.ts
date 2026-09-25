@@ -1,9 +1,11 @@
 /**
  * dsh-ipcalc — IP & subnet math toolbox for DeepSeek Harness.
  *
- * Five pure-math tools, zero runtime dependencies, no network I/O:
+ * Seven pure-math tools, zero runtime dependencies, no network I/O:
  *   ipv4_subnet     — full IPv4 subnet layout (network/broadcast/mask/hosts/classes)
  *   ipv4_summarize  — minimal covering CIDR list for a set of addresses/ranges
+ *   ipv4_split      — equal network-aligned subnets for VLSM planning
+ *   ipv4_range      — arbitrary address range → minimal covering CIDR list
  *   ip_parse        — validate, normalize (RFC 5952) and classify IPv4/IPv6
  *   ipv6_subnet     — full IPv6 subnet layout (128-bit BigInt math, exact counts)
  *   ip_match        — membership test of a bare IP against an IPv4/IPv6 CIDR

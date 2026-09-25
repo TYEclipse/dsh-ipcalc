@@ -67,6 +67,10 @@ export interface SubnetInfo {
  * /32 is a single host.
  */
 export declare function subnetOf(spec: CidrSpec): SubnetInfo;
+/** Usable host count for a prefix, honoring RFC 3021 (/31) and /32 hosts. */
+export declare function usableHostsForPrefix(prefix: number): number;
+/** Split a CIDR into the equal subnets of a longer prefix (network-aligned). */
+export declare function splitSpec(spec: CidrSpec, newPrefix: number): string[];
 /** Merge a list of integer ranges into maximal contiguous runs. */
 export declare function mergeRanges(ranges: Array<[number, number]>): Array<[number, number]>;
 /** Cover one contiguous integer range with the minimal CIDR list. */

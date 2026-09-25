@@ -1,13 +1,17 @@
 /**
- * Tool definitions for dsh-ipcalc: three pure-math tools exposed to every
+ * Tool definitions for dsh-ipcalc: seven pure-math tools exposed to every
  * agent via defineTool. Each tool has a strict JSON-schema parameter
  * surface and a compact text renderer. No network I/O happens anywhere.
  *
  * @module dsh-ipcalc/tools
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { classifyV4, parseCidr, parseV4, subnetOf, summarizeSpecs, } from "./ipv4.js";
+import { classifyV4, parseCidr, parseV4, rangeToCidrs, splitSpec, subnetOf, summarizeSpecs, usableHostsForPrefix, } from "./ipv4.js";
 import { bigIntToHextets, normalizeV6, parseV6, parseV6Cidr, v6RangeOf, v6SubnetOf, v6ToBigInt, } from "./ipv6.js";
+/** Maximum number of subnets ipv4_split returns in one call. */
+export const SPLIT_LIMIT = 256;
+/** Number of subnet lines the ipv4_split renderer prints before eliding. */
+export const SPLIT_RENDER_CAP = 12;
 const V4_CLASSES = [
     'unspecified', 'broadcast', 'loopback', 'private', 'cgnat', 'link_local',
     'documentation', 'multicast', 'reserved', 'global',
@@ -80,6 +84,36 @@ function renderSummarize(value) {
     if (!result.valid)
         return `invalid input: ${result.reason ?? 'unknown error'}`;
     return `${result.input_count} input(s) → ${result.output_count} CIDR(s) covering ${result.addresses_covered} address(es):\n  ${(result.cidrs ?? []).join('\n  ')}`;
+}
+function renderSplit(value) {
+    const result = value;
+    if (!result.valid || result.cidrs === undefined) {
+        return `invalid input: ${result.reason ?? 'unknown error'}`;
+    }
+    const shown = result.cidrs.slice(0, SPLIT_RENDER_CAP);
+    const lines = [
+        `${result.input} → ${result.count} × /${result.new_prefix} subnet(s), ${result.usable_each} usable host(s) each`,
+        ...shown.map((cidr) => `  ${cidr}`),
+    ];
+    if (result.cidrs.length > shown.length) {
+        lines.push(`  … and ${result.cidrs.length - shown.length} more`);
+    }
+    if (result.note !== undefined)
+        lines.push(`  note: ${result.note}`);
+    return lines.join('\n');
+}
+function renderRange(value) {
+    const result = value;
+    if (!result.valid || result.cidrs === undefined) {
+        return `invalid input: ${result.reason ?? 'unknown error'}`;
+    }
+    const lines = [
+        `${result.start} – ${result.end} → ${result.count} CIDR(s) covering ${result.addresses_covered} address(es)`,
+        ...result.cidrs.map((cidr) => `  ${cidr}`),
+    ];
+    if (result.note !== undefined)
+        lines.push(`  note: ${result.note}`);
+    return lines.join('\n');
 }
 function renderIpParse(value) {
     const result = value;
@@ -214,6 +248,164 @@ export function buildIpcalcTools() {
                 output_count: cidrs.length,
                 addresses_covered: covered,
             };
+        },
+    });
+    const ipv4_split = defineTool({
+        name: 'ipv4_split',
+        description: 'Split an IPv4 CIDR into equal, network-aligned subnets — either a number of parts '
+            + '(power of two) or a target prefix length. Returns each subnet as CIDR plus the per-subnet '
+            + 'address and usable-host counts and the RFC 3021 /31 and single-host /32 conventions. '
+            + 'Pure local math, no network access. Use this to plan VLSM layouts or cut a /24 into /26s '
+            + 'instead of doing the arithmetic yourself.',
+        parameters: {
+            cidr: { type: 'string', required: true, description: 'IPv4 CIDR to split: "a.b.c.d/prefix", "a.b.c.d/dotted-mask" or a bare "a.b.c.d" address.' },
+            parts: { type: 'number', description: 'Number of equal subnets to produce: a power of two >= 2 (2, 4, 8, 16, ... up to 256). Give this or prefix, not both.' },
+            prefix: { type: 'number', description: 'Target prefix length for each subnet (must be greater than the source prefix, at most 32). Give this or parts, not both.' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    input: { type: 'string', required: true },
+                    cidr: { type: 'string' },
+                    source_prefix: { type: 'number' },
+                    new_prefix: { type: 'number' },
+                    count: { type: 'number' },
+                    addresses_each: { type: 'number' },
+                    usable_each: { type: 'number' },
+                    cidrs: { type: 'array', items: { type: 'string' } },
+                    first: { type: 'string' },
+                    last: { type: 'string' },
+                    note: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderSplit(value) }],
+        },
+        async execute(args) {
+            const spec = parseCidr(args.cidr);
+            if (spec === null) {
+                return { valid: false, input: args.cidr, reason: 'not a valid IPv4 CIDR (expected a.b.c.d/p, a.b.c.d/mask or a.b.c.d)' };
+            }
+            const hasParts = args.parts !== undefined;
+            const hasPrefix = args.prefix !== undefined;
+            if (hasParts === hasPrefix) {
+                return { valid: false, input: args.cidr, reason: 'provide exactly one of parts (power-of-two subnet count) or prefix (target prefix length)' };
+            }
+            let newPrefix;
+            if (hasPrefix) {
+                const target = args.prefix;
+                if (!Number.isInteger(target) || target < 0 || target > 32) {
+                    return { valid: false, input: args.cidr, reason: `prefix must be an integer between 0 and 32 (got ${target})` };
+                }
+                if (target <= spec.prefix) {
+                    return { valid: false, input: args.cidr, reason: `prefix ${target} must be greater than the source prefix ${spec.prefix} — splitting cannot widen a subnet` };
+                }
+                newPrefix = target;
+            }
+            else {
+                const parts = args.parts;
+                if (!Number.isInteger(parts) || parts < 2) {
+                    return { valid: false, input: args.cidr, reason: `parts must be an integer >= 2 (got ${parts})` };
+                }
+                if (parts > SPLIT_LIMIT) {
+                    return { valid: false, input: args.cidr, reason: `parts is limited to ${SPLIT_LIMIT} subnets per call (got ${parts})` };
+                }
+                const exponent = Math.log2(parts);
+                if (!Number.isInteger(exponent)) {
+                    return { valid: false, input: args.cidr, reason: `parts must be a power of two — 2, 4, 8, 16, ... (got ${parts})` };
+                }
+                newPrefix = spec.prefix + exponent;
+                if (newPrefix > 32) {
+                    return { valid: false, input: args.cidr, reason: `splitting /${spec.prefix} into ${parts} parts needs /${newPrefix}, which exceeds /32` };
+                }
+            }
+            const count = 2 ** (newPrefix - spec.prefix);
+            if (count > SPLIT_LIMIT) {
+                return {
+                    valid: false,
+                    input: args.cidr,
+                    reason: `splitting /${spec.prefix} into /${newPrefix} would produce ${count} subnets — the limit is ${SPLIT_LIMIT} per call; pick a shorter prefix or split the sub-ranges in turn`,
+                };
+            }
+            const source = subnetOf(spec);
+            const cidrs = splitSpec(spec, newPrefix);
+            const result = {
+                valid: true,
+                input: args.cidr,
+                cidr: source.cidr,
+                source_prefix: spec.prefix,
+                new_prefix: newPrefix,
+                count,
+                addresses_each: 2 ** (32 - newPrefix),
+                usable_each: usableHostsForPrefix(newPrefix),
+                cidrs,
+                first: cidrs[0],
+                last: cidrs[cidrs.length - 1],
+            };
+            if (newPrefix === 31) {
+                result.note = 'RFC 3021: both addresses of each /31 are usable on point-to-point links';
+            }
+            else if (newPrefix === 32) {
+                result.note = 'each /32 is a single host';
+            }
+            return result;
+        },
+    });
+    const ipv4_range = defineTool({
+        name: 'ipv4_range',
+        description: 'Convert an arbitrary IPv4 address range (start and end address) into the minimal '
+            + 'list of CIDR blocks that covers exactly that range — the inverse of summarizing. Returns the '
+            + 'block list, the block count and the exact number of addresses covered. Pure local math, no '
+            + 'network access. Use this to turn "10.0.5.3 to 10.0.9.200" into firewall/ACL rules instead of '
+            + 'approximating with an oversized subnet.',
+        parameters: {
+            start: { type: 'string', required: true, description: 'First address of the range as a bare dotted-quad IPv4 address (no CIDR notation).' },
+            end: { type: 'string', required: true, description: 'Last address of the range as a bare dotted-quad IPv4 address (no CIDR notation).' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    start: { type: 'string' },
+                    end: { type: 'string' },
+                    cidrs: { type: 'array', items: { type: 'string' } },
+                    count: { type: 'number' },
+                    addresses_covered: { type: 'number' },
+                    note: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderRange(value) }],
+        },
+        async execute(args) {
+            const first = parseV4(args.start.trim());
+            if (first === null) {
+                return { valid: false, reason: `"${args.start.trim()}" is not a valid bare IPv4 address (CIDR notation is not allowed here)` };
+            }
+            const last = parseV4(args.end.trim());
+            if (last === null) {
+                return { valid: false, reason: `"${args.end.trim()}" is not a valid bare IPv4 address (CIDR notation is not allowed here)` };
+            }
+            if (first.integer > last.integer) {
+                return { valid: false, start: first.text, end: last.text, reason: `start (${first.text}) is greater than end (${last.text}) — swap the arguments` };
+            }
+            const cidrs = rangeToCidrs(first.integer, last.integer);
+            const result = {
+                valid: true,
+                start: first.text,
+                end: last.text,
+                cidrs,
+                count: cidrs.length,
+                addresses_covered: last.integer - first.integer + 1,
+            };
+            if (first.integer === last.integer)
+                result.note = 'single address (one /32)';
+            return result;
         },
     });
     const ip_parse = defineTool({
@@ -402,6 +594,6 @@ export function buildIpcalcTools() {
             };
         },
     });
-    return { ipv4_subnet, ipv4_summarize, ip_parse, ipv6_subnet, ip_match };
+    return { ipv4_subnet, ipv4_summarize, ipv4_split, ipv4_range, ip_parse, ipv6_subnet, ip_match };
 }
 //# sourceMappingURL=tools.js.map
