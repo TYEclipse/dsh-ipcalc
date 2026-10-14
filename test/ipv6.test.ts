@@ -1,6 +1,11 @@
 /**
  * Tests for IPv6 parsing, RFC 5952 normalization and classification.
- * Anchor values were computed with an independent closed-form script.
+ *
+ * ORACLE: test/oracle/anchors.py
+ *
+ * Anchor values come from the independent Python implementation (stdlib
+ * `ipaddress`) — section "Q" of the oracle, reproducible with
+ * `python3 test/oracle/anchors.py`.
  */
 
 import { describe, expect, it } from 'vitest'

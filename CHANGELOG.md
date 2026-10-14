@@ -2,6 +2,10 @@
 
 > 版本口径：patch 修 bug/补测试｜minor 新增用户可见功能｜major 破坏性变更。安装：`dsh plugin --profile web add github:TYEclipse/dsh-ipcalc`
 
+## [0.4.0] — 2026-10-15
+### Minor · R70
+- [自主进化] R70: ipv4_allocate（VLSM 分配：按主机数逐条给出对齐子网 + 放置顺序 + 剩余空闲 + 浪费）+ ipv4_exclude（地址池扣除：最小空闲 CIDR 列表 + 每条例外的实际扣除量）；oracle 迁入 test/oracle/anchors.py 并补 --self-check
+
 ## [0.3.0] — 2026-09-26
 ### Minor · R50
 - **新增 `ipv4_split`** — 把一个 IPv4 CIDR 等分成网络对齐的子网：按份数（2 的幂，≤256）或按目标前缀；先掩掉主机位，目标前缀必须长于源前缀。输出每个子网的 CIDR、每子网地址数/可用主机数、首末子网，并遵循 RFC 3021（/31 两地址可用）与单主机 /32 约定。用于 VLSM 规划 / 网段切分。

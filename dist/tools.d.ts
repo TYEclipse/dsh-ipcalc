@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-ipcalc: seven pure-math tools exposed to every
+ * Tool definitions for dsh-ipcalc: nine pure-math tools exposed to every
  * agent via defineTool. Each tool has a strict JSON-schema parameter
  * surface and a compact text renderer. No network I/O happens anywhere.
  *
@@ -12,6 +12,8 @@ export interface ToolSet {
     ipv4_subnet: ToolDefinition;
     ipv4_summarize: ToolDefinition;
     ipv4_split: ToolDefinition;
+    ipv4_allocate: ToolDefinition;
+    ipv4_exclude: ToolDefinition;
     ipv4_range: ToolDefinition;
     ip_parse: ToolDefinition;
     ipv6_subnet: ToolDefinition;
@@ -21,6 +23,8 @@ export interface ToolSet {
 export declare const SPLIT_LIMIT = 256;
 /** Number of subnet lines the ipv4_split renderer prints before eliding. */
 export declare const SPLIT_RENDER_CAP = 12;
+/** Number of allocation / exclusion lines the planning renderers print before eliding. */
+export declare const PLAN_RENDER_CAP = 16;
 /** The full output of ipv4_subnet on success (every key always present). */
 export interface SubnetResult {
     valid: boolean;
@@ -75,6 +79,61 @@ export interface RangeResult {
     cidrs?: string[];
     count?: number;
     addresses_covered?: number;
+    note?: string;
+    reason?: string;
+}
+/** One placed subnet of an ipv4_allocate plan. */
+export interface AllocationEntry {
+    request_index: number;
+    requested_hosts: number;
+    prefix: number;
+    cidr: string;
+    network: string;
+    last: string;
+    addresses: number;
+    usable_hosts: number;
+    wasted: number;
+    note?: string;
+}
+/** The full output of ipv4_allocate (every key always present on success). */
+export interface AllocateResult {
+    valid: boolean;
+    input: string;
+    cidr?: string;
+    order?: string;
+    allocations?: AllocationEntry[];
+    count?: number;
+    placement?: number[];
+    requested_hosts?: number;
+    allocated_addresses?: number;
+    allocated_usable?: number;
+    parent_addresses?: number;
+    wasted_addresses?: number;
+    free_blocks?: string[];
+    free_count?: number;
+    free_addresses?: number;
+    note?: string;
+    reason?: string;
+}
+/** One exclusion entry of an ipv4_exclude run. */
+export interface ExclusionEntry {
+    input: string;
+    cidr: string;
+    addresses: number;
+    removed: number;
+    fully_inside: boolean;
+}
+/** The full output of ipv4_exclude (every key always present on success). */
+export interface ExcludeResult {
+    valid: boolean;
+    input?: string;
+    cidr?: string;
+    excluded?: ExclusionEntry[];
+    removed_addresses?: number;
+    outside_addresses?: number;
+    free?: string[];
+    free_count?: number;
+    free_addresses?: number;
     note?: string;
     reason?: string;
 }

@@ -1,7 +1,12 @@
 /**
  * Tests for IPv4 parsing, formatting, subnet math, classification and
- * CIDR summarization. Anchor values were computed with an independent
- * closed-form script (not round-trip self-consistency).
+ * CIDR summarization.
+ *
+ * ORACLE: test/oracle/anchors.py
+ *
+ * Anchor values come from the independent Python implementation (stdlib
+ * `ipaddress`) — section "P" of the oracle, reproducible with
+ * `python3 test/oracle/anchors.py`; never from round-trip self-consistency.
  */
 
 import { describe, expect, it } from 'vitest'

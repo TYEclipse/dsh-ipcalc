@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-ipcalc: seven pure-math tools exposed to every
+ * Tool definitions for dsh-ipcalc: nine pure-math tools exposed to every
  * agent via defineTool. Each tool has a strict JSON-schema parameter
  * surface and a compact text renderer. No network I/O happens anywhere.
  *
@@ -9,11 +9,17 @@
 import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import {
   classifyV4,
+  formatV4,
+  MAX_REQUEST_HOSTS,
+  PLAN_LIMIT,
+  packBlocks,
   parseCidr,
   parseV4,
+  prefixForHosts,
   rangeToCidrs,
   splitSpec,
   subnetOf,
+  subtractRanges,
   summarizeSpecs,
   usableHostsForPrefix,
   type CidrSpec,
@@ -36,6 +42,8 @@ export interface ToolSet {
   ipv4_subnet: ToolDefinition
   ipv4_summarize: ToolDefinition
   ipv4_split: ToolDefinition
+  ipv4_allocate: ToolDefinition
+  ipv4_exclude: ToolDefinition
   ipv4_range: ToolDefinition
   ip_parse: ToolDefinition
   ipv6_subnet: ToolDefinition
@@ -47,6 +55,9 @@ export const SPLIT_LIMIT = 256
 
 /** Number of subnet lines the ipv4_split renderer prints before eliding. */
 export const SPLIT_RENDER_CAP = 12
+
+/** Number of allocation / exclusion lines the planning renderers print before eliding. */
+export const PLAN_RENDER_CAP = 16
 
 /** The full output of ipv4_subnet on success (every key always present). */
 export interface SubnetResult {
@@ -105,6 +116,65 @@ export interface RangeResult {
   cidrs?: string[]
   count?: number
   addresses_covered?: number
+  note?: string
+  reason?: string
+}
+
+/** One placed subnet of an ipv4_allocate plan. */
+export interface AllocationEntry {
+  request_index: number
+  requested_hosts: number
+  prefix: number
+  cidr: string
+  network: string
+  last: string
+  addresses: number
+  usable_hosts: number
+  wasted: number
+  note?: string
+}
+
+/** The full output of ipv4_allocate (every key always present on success). */
+export interface AllocateResult {
+  valid: boolean
+  input: string
+  cidr?: string
+  order?: string
+  allocations?: AllocationEntry[]
+  count?: number
+  placement?: number[]
+  requested_hosts?: number
+  allocated_addresses?: number
+  allocated_usable?: number
+  parent_addresses?: number
+  wasted_addresses?: number
+  free_blocks?: string[]
+  free_count?: number
+  free_addresses?: number
+  note?: string
+  reason?: string
+}
+
+/** One exclusion entry of an ipv4_exclude run. */
+export interface ExclusionEntry {
+  input: string
+  cidr: string
+  addresses: number
+  removed: number
+  fully_inside: boolean
+}
+
+/** The full output of ipv4_exclude (every key always present on success). */
+export interface ExcludeResult {
+  valid: boolean
+  input?: string
+  cidr?: string
+  excluded?: ExclusionEntry[]
+  removed_addresses?: number
+  outside_addresses?: number
+  free?: string[]
+  free_count?: number
+  free_addresses?: number
   note?: string
   reason?: string
 }
@@ -261,6 +331,49 @@ function renderRange(value: unknown): string {
   return lines.join('\n')
 }
 
+function renderAllocate(value: unknown): string {
+  const result = value as AllocateResult
+  if (!result.valid || result.allocations === undefined) {
+    return `invalid input: ${result.reason ?? 'unknown error'}`
+  }
+  const shown = result.allocations.slice(0, PLAN_RENDER_CAP)
+  const lines = [
+    `${result.input} → ${result.count} subnet(s) placed, ${result.allocated_addresses} of ${result.parent_addresses} address(es) used`
+      + `, ${result.wasted_addresses} beyond the requests`,
+    ...shown.map((entry) => `  #${entry.request_index + 1} needs ${entry.requested_hosts} → ${entry.cidr}`
+      + ` (${entry.usable_hosts} usable, ${entry.wasted} wasted)${entry.note !== undefined ? ` — ${entry.note}` : ''}`),
+  ]
+  if (result.allocations.length > shown.length) {
+    lines.push(`  … and ${result.allocations.length - shown.length} more`)
+  }
+  const free = result.free_blocks ?? []
+  lines.push(`  free: ${free.length} block(s), ${result.free_addresses} address(es)`)
+  for (const cidr of free.slice(0, PLAN_RENDER_CAP)) lines.push(`  ${cidr}`)
+  if (free.length > PLAN_RENDER_CAP) lines.push(`  … and ${free.length - PLAN_RENDER_CAP} more`)
+  if (result.note !== undefined) lines.push(`  note: ${result.note}`)
+  return lines.join('\n')
+}
+
+function renderExclude(value: unknown): string {
+  const result = value as ExcludeResult
+  if (!result.valid || result.free === undefined) {
+    return `invalid input: ${result.reason ?? 'unknown error'}`
+  }
+  const lines = [
+    `${result.input} minus ${result.excluded?.length ?? 0} exclusion(s) → ${result.free_count} free block(s)`
+      + ` covering ${result.free_addresses} address(es)`,
+    ...result.free.slice(0, PLAN_RENDER_CAP).map((cidr) => `  ${cidr}`),
+  ]
+  if (result.free.length > PLAN_RENDER_CAP) {
+    lines.push(`  … and ${result.free.length - PLAN_RENDER_CAP} more`)
+  }
+  if (result.outside_addresses !== undefined && result.outside_addresses > 0) {
+    lines.push(`  outside the pool: ${result.outside_addresses} address(es) of the exclusions were never in it`)
+  }
+  if (result.note !== undefined) lines.push(`  note: ${result.note}`)
+  return lines.join('\n')
+}
+
 function renderIpParse(value: unknown): string {
   const result = value as IpParseResult
   if (!result.valid) return `invalid IP: ${result.reason ?? 'unknown error'}`
@@ -403,8 +516,8 @@ export function buildIpcalcTools(): ToolSet {
     description: 'Split an IPv4 CIDR into equal, network-aligned subnets — either a number of parts '
       + '(power of two) or a target prefix length. Returns each subnet as CIDR plus the per-subnet '
       + 'address and usable-host counts and the RFC 3021 /31 and single-host /32 conventions. '
-      + 'Pure local math, no network access. Use this to plan VLSM layouts or cut a /24 into /26s '
-      + 'instead of doing the arithmetic yourself.',
+      + 'Pure local math, no network access. Use this to cut a /24 into /26s; when the subnets must be '
+      + 'different sizes use ipv4_allocate instead.',
     parameters: {
       cidr: { type: 'string', required: true, description: 'IPv4 CIDR to split: "a.b.c.d/prefix", "a.b.c.d/dotted-mask" or a bare "a.b.c.d" address.' },
       parts: { type: 'number', description: 'Number of equal subnets to produce: a power of two >= 2 (2, 4, 8, 16, ... up to 256). Give this or prefix, not both.' },
@@ -500,6 +613,276 @@ export function buildIpcalcTools(): ToolSet {
       } else if (newPrefix === 32) {
         result.note = 'each /32 is a single host'
       }
+      return result
+    },
+  })
+
+  const ipv4_allocate = defineTool({
+    name: 'ipv4_allocate',
+    description: 'Plan a VLSM layout instead of doing the arithmetic yourself: give a parent IPv4 CIDR '
+      + 'plus the host count each subnet must hold (e.g. cidr "10.0.0.0/16", hosts [100, 50, 20, 20, 5]) '
+      + 'and get back one non-overlapping, network-aligned subnet per request, each at the smallest '
+      + 'prefix that fits it — plus the placement order, the free blocks left over and how many '
+      + 'addresses were allocated beyond the requests. order "largest_first" (default) puts the biggest '
+      + 'subnets lowest in the block, which keeps room to grow later; order "given" keeps the input '
+      + 'sequence. Either way every request is placed as long as the requests fit — a failure is a plain '
+      + 'capacity error, not fragmentation. '
+      + 'point_to_point true allows the RFC 3021 shortcuts (1 host → /32, 2 hosts → /31); by default the '
+      + 'smallest subnet is a /30. Results stay in request order with a placement list. Pure local math, '
+      + 'no network access.',
+    parameters: {
+      cidr: { type: 'string', required: true, description: 'Parent IPv4 block to allocate from: "a.b.c.d/prefix", "a.b.c.d/dotted-mask" or a bare "a.b.c.d" address.' },
+      hosts: {
+        type: 'array',
+        required: true,
+        items: { type: 'number' },
+        description: 'Host count for each subnet to place, e.g. [100, 50, 20] (1–64 entries; each 1–4294967294).',
+      },
+      order: { type: 'string', enum: ['largest_first', 'given'], description: 'Placement order: "largest_first" (default) or "given" (input sequence).' },
+      point_to_point: { type: 'boolean', description: 'Allow the RFC 3021 //31 and /32 shortcuts: 1 host → /32, 2 hosts → /31. Default false, so the smallest subnet is a /30.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          valid: { type: 'boolean', required: true },
+          input: { type: 'string', required: true },
+          cidr: { type: 'string' },
+          order: { type: 'string' },
+          allocations: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                request_index: { type: 'number', required: true },
+                requested_hosts: { type: 'number', required: true },
+                prefix: { type: 'number', required: true },
+                cidr: { type: 'string', required: true },
+                network: { type: 'string', required: true },
+                last: { type: 'string', required: true },
+                addresses: { type: 'number', required: true },
+                usable_hosts: { type: 'number', required: true },
+                wasted: { type: 'number', required: true },
+                note: { type: 'string' },
+              },
+            },
+          },
+          count: { type: 'number' },
+          placement: { type: 'array', items: { type: 'number' } },
+          requested_hosts: { type: 'number' },
+          allocated_addresses: { type: 'number' },
+          allocated_usable: { type: 'number' },
+          parent_addresses: { type: 'number' },
+          wasted_addresses: { type: 'number' },
+          free_blocks: { type: 'array', items: { type: 'string' } },
+          free_count: { type: 'number' },
+          free_addresses: { type: 'number' },
+          note: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args: { cidr: string; hosts: number[] }, value: unknown) => [{ type: 'text', text: renderAllocate(value) }],
+    },
+    async execute(args: { cidr: string; hosts: number[]; order?: 'largest_first' | 'given'; point_to_point?: boolean }): Promise<AllocateResult> {
+      const spec = parseCidr(args.cidr)
+      if (spec === null) {
+        return { valid: false, input: args.cidr, reason: 'not a valid IPv4 CIDR (expected a.b.c.d/p, a.b.c.d/mask or a.b.c.d)' }
+      }
+      if (args.hosts.length < 1) {
+        return { valid: false, input: args.cidr, reason: 'hosts must contain at least one entry' }
+      }
+      if (args.hosts.length > PLAN_LIMIT) {
+        return { valid: false, input: args.cidr, reason: `hosts is limited to ${PLAN_LIMIT} entries per call (got ${args.hosts.length})` }
+      }
+      const pointToPoint = args.point_to_point === true
+      const order = args.order ?? 'largest_first'
+      const parent = subnetOf(spec)
+      const prefixes: number[] = []
+      for (let index = 0; index < args.hosts.length; index++) {
+        const need = args.hosts[index]!
+        const prefix = prefixForHosts(need, pointToPoint)
+        if (prefix === null) {
+          return {
+            valid: false,
+            input: args.cidr,
+            reason: `entry #${index + 1} (${need}) is not a usable host count — expected an integer between 1 and ${MAX_REQUEST_HOSTS}`,
+          }
+        }
+        prefixes.push(prefix)
+      }
+      const sizes = prefixes.map((prefix) => 2 ** (32 - prefix))
+      const needed = sizes.reduce((total, size) => total + size, 0)
+      const packed = packBlocks(parent.network_integer, parent.addresses, sizes, order === 'largest_first')
+      if (packed === null) {
+        // Aligned power-of-two blocks never fragment (see packBlocks): the only
+        // way to fail is that the blocks do not all fit in the parent.
+        return {
+          valid: false,
+          input: args.cidr,
+          cidr: parent.cidr,
+          reason: `requests need ${needed} addresses but ${parent.cidr} only has ${parent.addresses}`,
+        }
+      }
+
+      const allocations: AllocationEntry[] = []
+      for (const placement of packed.placements) {
+        const prefix = prefixes[placement.index]!
+        const entry: AllocationEntry = {
+          request_index: placement.index,
+          requested_hosts: args.hosts[placement.index]!,
+          prefix,
+          cidr: `${formatV4(placement.start)}/${prefix}`,
+          network: formatV4(placement.start),
+          last: formatV4(placement.start + placement.size - 1),
+          addresses: placement.size,
+          usable_hosts: usableHostsForPrefix(prefix),
+          wasted: placement.size - args.hosts[placement.index]!,
+        }
+        if (prefix === 32) entry.note = 'single host'
+        else if (prefix === 31) entry.note = 'RFC 3021 point-to-point pair'
+        allocations.push(entry)
+      }
+      allocations.sort((a, b) => a.request_index - b.request_index)
+
+      const freeRanges = packed.free
+      const freeBlocks = freeRanges.flatMap(([from, to]) => rangeToCidrs(from, to))
+      const requestedHosts = args.hosts.reduce((total, need) => total + need, 0)
+      const allocatedAddresses = sizes.reduce((total, size) => total + size, 0)
+      const result: AllocateResult = {
+        valid: true,
+        input: args.cidr,
+        cidr: parent.cidr,
+        order,
+        allocations,
+        count: allocations.length,
+        placement: packed.placements.map((placement) => placement.index),
+        requested_hosts: requestedHosts,
+        allocated_addresses: allocatedAddresses,
+        allocated_usable: allocations.reduce((total, entry) => total + entry.usable_hosts, 0),
+        parent_addresses: parent.addresses,
+        wasted_addresses: allocatedAddresses - requestedHosts,
+        free_blocks: freeBlocks,
+        free_count: freeBlocks.length,
+        free_addresses: freeRanges.reduce((total, [from, to]) => total + (to - from + 1), 0),
+      }
+      if (spec.ip.integer !== parent.network_integer) {
+        result.note = `parent normalized to ${parent.cidr} (bits below /${parent.prefix} are host bits)`
+      }
+      return result
+    },
+  })
+
+  const ipv4_exclude = defineTool({
+    name: 'ipv4_exclude',
+    description: 'Carve reserved blocks out of a pool: give a parent IPv4 CIDR plus the subnets to '
+      + 'exclude (e.g. cidr "10.0.0.0/16", exclude ["10.0.0.0/24", "10.0.8.0/22"]) and get back the '
+      + 'remaining free space as the minimal CIDR list, the exact number of free addresses, and one '
+      + 'entry per exclusion with its block size, how many addresses it actually removes and whether it '
+      + 'lies fully inside the pool. Entries that overlap each other are only subtracted once; entries '
+      + 'reaching outside the pool are reported as such instead of being silently clipped. Pure local '
+      + 'math, no network access. Use it before splitting a range so the reservations stop being manual '
+      + 'bookkeeping.',
+    parameters: {
+      cidr: { type: 'string', required: true, description: 'Parent IPv4 pool to subtract from: "a.b.c.d/prefix", "a.b.c.d/dotted-mask" or a bare "a.b.c.d" address.' },
+      exclude: {
+        type: 'array',
+        required: true,
+        items: { type: 'string' },
+        description: 'CIDRs to carve out of the pool, e.g. ["10.0.0.0/24", "10.0.8.0/22"] (1–64 entries).',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          valid: { type: 'boolean', required: true },
+          input: { type: 'string' },
+          cidr: { type: 'string' },
+          excluded: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                input: { type: 'string', required: true },
+                cidr: { type: 'string', required: true },
+                addresses: { type: 'number', required: true },
+                removed: { type: 'number', required: true },
+                fully_inside: { type: 'boolean', required: true },
+              },
+            },
+          },
+          removed_addresses: { type: 'number' },
+          outside_addresses: { type: 'number' },
+          free: { type: 'array', items: { type: 'string' } },
+          free_count: { type: 'number' },
+          free_addresses: { type: 'number' },
+          note: { type: 'string' },
+          reason: { type: 'string' },
+        },
+      },
+      render: (_args: { cidr: string; exclude: string[] }, value: unknown) => [{ type: 'text', text: renderExclude(value) }],
+    },
+    async execute(args: { cidr: string; exclude: string[] }): Promise<ExcludeResult> {
+      const spec = parseCidr(args.cidr)
+      if (spec === null) {
+        return { valid: false, input: args.cidr, reason: 'not a valid IPv4 CIDR (expected a.b.c.d/p, a.b.c.d/mask or a.b.c.d)' }
+      }
+      if (args.exclude.length < 1) {
+        return { valid: false, input: args.cidr, reason: 'exclude must contain at least one CIDR' }
+      }
+      if (args.exclude.length > PLAN_LIMIT) {
+        return { valid: false, input: args.cidr, reason: `exclude is limited to ${PLAN_LIMIT} entries per call (got ${args.exclude.length})` }
+      }
+      const parent = subnetOf(spec)
+      const entries: ExclusionEntry[] = []
+      const cuts: Array<[number, number]> = []
+      let outsideAddresses = 0
+      for (let index = 0; index < args.exclude.length; index++) {
+        const text = args.exclude[index]!
+        const cut = parseCidr(text)
+        if (cut === null) {
+          return { valid: false, input: args.cidr, reason: `entry #${index + 1} ("${text}") is not a valid IPv4 address or CIDR` }
+        }
+        const size = 2 ** (32 - cut.prefix)
+        const from = cut.ip.integer - (cut.ip.integer % size)
+        const to = from + size - 1
+        cuts.push([from, to])
+        const overlapFrom = Math.max(from, parent.network_integer)
+        const overlapTo = Math.min(to, parent.broadcast_integer)
+        const removed = overlapFrom <= overlapTo ? overlapTo - overlapFrom + 1 : 0
+        outsideAddresses += size - removed
+        entries.push({
+          input: text,
+          cidr: `${formatV4(from)}/${cut.prefix}`,
+          addresses: size,
+          removed,
+          fully_inside: removed === size,
+        })
+      }
+
+      const freeRanges = subtractRanges(parent.network_integer, parent.broadcast_integer, cuts)
+      const free = freeRanges.flatMap(([from, to]) => rangeToCidrs(from, to))
+      const freeAddresses = freeRanges.reduce((total, [from, to]) => total + (to - from + 1), 0)
+      const result: ExcludeResult = {
+        valid: true,
+        input: args.cidr,
+        cidr: parent.cidr,
+        excluded: entries,
+        removed_addresses: parent.addresses - freeAddresses,
+        outside_addresses: outsideAddresses,
+        free,
+        free_count: free.length,
+        free_addresses: freeAddresses,
+      }
+      const notes: string[] = []
+      if (free.length === 0) notes.push('every address of the pool is excluded — nothing is left to allocate')
+      else if (outsideAddresses > 0) notes.push('some exclusions reach outside the pool; only the overlapping part is removed')
+      if (spec.ip.integer !== parent.network_integer) notes.push(`parent normalized to ${parent.cidr} (bits below /${parent.prefix} are host bits)`)
+      if (notes.length > 0) result.note = notes.join('; ')
       return result
     },
   })
@@ -746,5 +1129,5 @@ export function buildIpcalcTools(): ToolSet {
     },
   })
 
-  return { ipv4_subnet, ipv4_summarize, ipv4_split, ipv4_range, ip_parse, ipv6_subnet, ip_match }
+  return { ipv4_subnet, ipv4_summarize, ipv4_split, ipv4_allocate, ipv4_exclude, ipv4_range, ip_parse, ipv6_subnet, ip_match }
 }
