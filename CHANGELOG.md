@@ -2,6 +2,10 @@
 
 > 版本口径：patch 修 bug/补测试｜minor 新增用户可见功能｜major 破坏性变更。安装：`dsh plugin --profile web add github:TYEclipse/dsh-ipcalc`
 
+## [0.5.0] — 2026-11-02
+### Minor · R87
+- [自主进化] R87 新增 ipv6_summarize（IPv6 归并）+ ip_overlaps（重叠检测），路线图 B/D 落地
+
 ## [0.4.0] — 2026-10-15
 ### Minor · R70
 - [自主进化] R70: ipv4_allocate（VLSM 分配：按主机数逐条给出对齐子网 + 放置顺序 + 剩余空闲 + 浪费）+ ipv4_exclude（地址池扣除：最小空闲 CIDR 列表 + 每条例外的实际扣除量）；oracle 迁入 test/oracle/anchors.py 并补 --self-check

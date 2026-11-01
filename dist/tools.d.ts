@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-ipcalc: nine pure-math tools exposed to every
+ * Tool definitions for dsh-ipcalc: eleven pure-math tools exposed to every
  * agent via defineTool. Each tool has a strict JSON-schema parameter
  * surface and a compact text renderer. No network I/O happens anywhere.
  *
@@ -17,6 +17,8 @@ export interface ToolSet {
     ipv4_range: ToolDefinition;
     ip_parse: ToolDefinition;
     ipv6_subnet: ToolDefinition;
+    ipv6_summarize: ToolDefinition;
+    ip_overlaps: ToolDefinition;
     ip_match: ToolDefinition;
 }
 /** Maximum number of subnets ipv4_split returns in one call. */
@@ -181,6 +183,43 @@ export interface IpMatchResult {
     last?: string;
     reason?: string;
 }
+/** The full output of ipv6_summarize on success. */
+export interface V6SummarizeResult {
+    valid: boolean;
+    cidrs?: string[];
+    input_count?: number;
+    output_count?: number;
+    input_addresses?: string;
+    addresses_covered?: string;
+    overlapping_addresses?: string;
+    note?: string;
+    reason?: string;
+}
+/** One conflicting pair reported by ip_overlaps. */
+export interface OverlapConflict {
+    a: string;
+    b: string;
+    a_index: number;
+    b_index: number;
+    relation: 'duplicate' | 'a_contains_b' | 'b_contains_a';
+    intersection: string;
+    addresses: string;
+}
+/** The full output of ip_overlaps on success. */
+export interface OverlapResult {
+    valid: boolean;
+    conflicts?: OverlapConflict[];
+    conflict_count?: number;
+    clean?: boolean;
+    pair_count?: number;
+    ipv4_count?: number;
+    ipv6_count?: number;
+    mixed_family_pairs?: number;
+    note?: string;
+    reason?: string;
+}
+/** Maximum entries accepted by ip_overlaps in one call. */
+export declare const OVERLAP_LIMIT = 200;
 /** Build the three ipcalc tool definitions. */
 export declare function buildIpcalcTools(): ToolSet;
 //# sourceMappingURL=tools.d.ts.map

@@ -56,6 +56,20 @@ export interface V6SubnetInfo {
  * /128 is a single host.
  */
 export declare function v6SubnetOf(spec: V6CidrSpec): V6SubnetInfo;
+/** Merge 128-bit integer ranges into maximal contiguous runs (BigInt mirror of
+ * the IPv4 helper — IPv6 needs the exact type because a /64 exceeds Number). */
+export declare function mergeV6Ranges(ranges: Array<[bigint, bigint]>): Array<[bigint, bigint]>;
+/**
+ * Cover one contiguous IPv6 range with the minimal CIDR list.
+ *
+ * Greedy from the low end: take the largest aligned power-of-two block that
+ * still fits inside the range. That is the classical range→prefix cover and
+ * it is minimal (every block is maximal at its start, so no two neighbours can
+ * be merged into one aligned block).
+ */
+export declare function v6RangeToCidrs(start: bigint, end: bigint): string[];
+/** Summarize parsed IPv6 CIDR specs into the minimal covering CIDR list. */
+export declare function v6SummarizeSpecs(specs: V6CidrSpec[]): string[];
 /** Render eight hextets in RFC 5952 canonical form. */
 export declare function normalizeV6(hextets: number[]): string;
 /**

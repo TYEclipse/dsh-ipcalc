@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-ipcalc: nine pure-math tools exposed to every
+ * Tool definitions for dsh-ipcalc: eleven pure-math tools exposed to every
  * agent via defineTool. Each tool has a strict JSON-schema parameter
  * surface and a compact text renderer. No network I/O happens anywhere.
  *
@@ -7,7 +7,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { classifyV4, formatV4, MAX_REQUEST_HOSTS, PLAN_LIMIT, packBlocks, parseCidr, parseV4, prefixForHosts, rangeToCidrs, splitSpec, subnetOf, subtractRanges, summarizeSpecs, usableHostsForPrefix, } from "./ipv4.js";
-import { bigIntToHextets, normalizeV6, parseV6, parseV6Cidr, v6RangeOf, v6SubnetOf, v6ToBigInt, } from "./ipv6.js";
+import { bigIntToHextets, normalizeV6, parseV6, parseV6Cidr, v6RangeOf, v6SubnetOf, v6SummarizeSpecs, v6ToBigInt, } from "./ipv6.js";
 /** Maximum number of subnets ipv4_split returns in one call. */
 export const SPLIT_LIMIT = 256;
 /** Number of subnet lines the ipv4_split renderer prints before eliding. */
@@ -191,6 +191,83 @@ function renderIpMatch(value) {
         return `invalid input: ${result.reason ?? 'unknown error'}`;
     const verdict = result.in_subnet === true ? 'INSIDE' : 'OUTSIDE';
     return `${result.ip} is ${verdict} ${result.cidr} (IPv${result.cidr_version})\n  network ${result.network} – ${result.last}`;
+}
+function renderV6Summarize(value) {
+    const result = value;
+    if (!result.valid || result.cidrs === undefined) {
+        return `invalid input: ${result.reason ?? 'unknown error'}`;
+    }
+    const shown = result.cidrs.slice(0, PLAN_RENDER_CAP);
+    const lines = [
+        `${result.input_count} input(s) → ${result.output_count} IPv6 CIDR(s) covering ${result.addresses_covered} address(es)`,
+        ...shown.map((cidr) => `  ${cidr}`),
+    ];
+    if (result.cidrs.length > shown.length) {
+        lines.push(`  … and ${result.cidrs.length - shown.length} more`);
+    }
+    if (result.note !== undefined)
+        lines.push(`  note: ${result.note}`);
+    return lines.join('\n');
+}
+function renderOverlaps(value) {
+    const result = value;
+    if (!result.valid || result.conflicts === undefined) {
+        return `invalid input: ${result.reason ?? 'unknown error'}`;
+    }
+    if (result.conflict_count === 0) {
+        return `${result.ipv4_count} IPv4 + ${result.ipv6_count} IPv6 CIDR(s): no overlaps`
+            + ` (${result.pair_count} same-family pair(s) checked)`;
+    }
+    const shown = result.conflicts.slice(0, PLAN_RENDER_CAP);
+    const lines = [
+        `${result.conflict_count} conflicting pair(s) of ${result.pair_count} same-family pair(s):`,
+        ...shown.map((conflict) => `  #${conflict.a_index + 1} ${conflict.a} vs ${conflict.b} (#${conflict.b_index + 1})`
+            + ` — ${conflict.relation}, ${conflict.addresses} address(es) overlapping`),
+    ];
+    if (result.conflicts.length > shown.length) {
+        lines.push(`  … and ${result.conflicts.length - shown.length} more`);
+    }
+    if (result.note !== undefined)
+        lines.push(`  note: ${result.note}`);
+    return lines.join('\n');
+}
+/** Maximum entries accepted by ip_overlaps in one call. */
+export const OVERLAP_LIMIT = 200;
+/**
+ * Resolve a bare address or CIDR of either family to an exact range.
+ * IPv4 values are widened to BigInt so one comparison path serves both
+ * families (a /64 cannot be held in a JS number).
+ */
+function resolveMixed(text, index) {
+    const raw = text.trim();
+    if (raw === '')
+        return null;
+    const v4 = parseCidr(raw);
+    if (v4 !== null) {
+        const subnet = subnetOf(v4);
+        return {
+            index,
+            input: text,
+            version: 4,
+            cidr: subnet.cidr,
+            start: BigInt(subnet.network_integer),
+            end: BigInt(subnet.broadcast_integer),
+            hostBitsSet: v4.ip.integer !== subnet.network_integer,
+        };
+    }
+    const v6 = parseV6Cidr(raw);
+    if (v6 === null)
+        return null;
+    const range = v6RangeOf(v6);
+    return {
+        index,
+        input: text,
+        version: 6,
+        cidr: `${normalizeV6(bigIntToHextets(range.network))}/${v6.prefix}`,
+        start: range.network,
+        end: range.last,
+        hostBitsSet: v6ToBigInt(v6.parsed.hextets) !== range.network,
+    };
 }
 /** Build the three ipcalc tool definitions. */
 export function buildIpcalcTools() {
@@ -912,6 +989,220 @@ export function buildIpcalcTools() {
             };
         },
     });
-    return { ipv4_subnet, ipv4_summarize, ipv4_split, ipv4_allocate, ipv4_exclude, ipv4_range, ip_parse, ipv6_subnet, ip_match };
+    const ipv6_summarize = defineTool({
+        name: 'ipv6_summarize',
+        description: 'Reduce a list of IPv6 addresses and CIDR prefixes (e.g. ["2001:db8::/33", "2001:db8:8000::/33"]) '
+            + 'to the minimal covering IPv6 CIDR list by merging adjacent ranges and supernetting aligned blocks. '
+            + 'Address counts are returned as exact decimal strings because a /64 already exceeds '
+            + 'Number.MAX_SAFE_INTEGER. Also reports how many addresses were listed more than once (overlapping inputs). '
+            + 'Pure local math, no network access. Use this to aggregate IPv6 route tables or filter lists — '
+            + 'ipv4_summarize has no IPv6 counterpart.',
+        parameters: {
+            networks: {
+                type: 'array',
+                required: true,
+                items: { type: 'string' },
+                description: 'List of IPv6 CIDRs and/or bare addresses to summarize (1–1000 entries); a bare address is /128.',
+            },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    cidrs: { type: 'array', items: { type: 'string' } },
+                    input_count: { type: 'number' },
+                    output_count: { type: 'number' },
+                    input_addresses: { type: 'string' },
+                    addresses_covered: { type: 'string' },
+                    overlapping_addresses: { type: 'string' },
+                    note: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderV6Summarize(value) }],
+        },
+        async execute(args) {
+            if (args.networks.length < 1) {
+                return { valid: false, reason: 'networks must contain at least one entry' };
+            }
+            if (args.networks.length > 1000) {
+                return { valid: false, reason: 'networks is limited to 1000 entries' };
+            }
+            const specs = [];
+            let hostBitsSet = 0;
+            for (let index = 0; index < args.networks.length; index++) {
+                const text = args.networks[index];
+                const spec = parseV6Cidr(text);
+                if (spec === null) {
+                    return { valid: false, reason: `entry #${index + 1} ("${text}") is not a valid IPv6 address or CIDR` };
+                }
+                const range = v6RangeOf(spec);
+                if (v6ToBigInt(spec.parsed.hextets) !== range.network)
+                    hostBitsSet++;
+                specs.push(spec);
+            }
+            const cidrs = v6SummarizeSpecs(specs);
+            let inputAddresses = 0n;
+            for (const spec of specs)
+                inputAddresses += 1n << BigInt(128 - spec.prefix);
+            let covered = 0n;
+            for (const cidr of cidrs)
+                covered += 1n << BigInt(128 - Number(cidr.split('/')[1]));
+            const result = {
+                valid: true,
+                cidrs,
+                input_count: args.networks.length,
+                output_count: cidrs.length,
+                input_addresses: inputAddresses.toString(),
+                addresses_covered: covered.toString(),
+                overlapping_addresses: (inputAddresses - covered).toString(),
+            };
+            const notes = [];
+            if (hostBitsSet > 0) {
+                notes.push(`${hostBitsSet} entry(ies) had host bits set; blocks were normalized to their network address`);
+            }
+            if (inputAddresses > covered) {
+                notes.push('inputs overlap each other — overlapping_addresses counts the addresses listed more than once');
+            }
+            if (notes.length > 0)
+                result.note = notes.join('; ');
+            return result;
+        },
+    });
+    const ip_overlaps = defineTool({
+        name: 'ip_overlaps',
+        description: 'Check a list of IPv4 and/or IPv6 CIDRs for overlaps: every conflicting pair is reported '
+            + 'with its relation (duplicate / one block contains the other) and the exact overlapping address count. '
+            + 'Inputs are normalized first, so "10.0.0.5/24" is treated as 10.0.0.0/24 and reported as a duplicate of it. '
+            + 'Prefix blocks are nested or disjoint — there is no third case — so a pair is either a conflict or it is not. '
+            + 'Mixed-family pairs can never overlap and are counted separately rather than ignored. '
+            + 'Pure local math, no network access. Use this to sanity-check firewall / ACL lists before they ship.',
+        parameters: {
+            networks: {
+                type: 'array',
+                required: true,
+                items: { type: 'string' },
+                description: 'List of IPv4/IPv6 CIDRs or bare addresses to compare (1–200 entries).',
+            },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    conflicts: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            additionalProperties: false,
+                            properties: {
+                                a: { type: 'string', required: true },
+                                b: { type: 'string', required: true },
+                                a_index: { type: 'number', required: true },
+                                b_index: { type: 'number', required: true },
+                                relation: { type: 'string', required: true },
+                                intersection: { type: 'string', required: true },
+                                addresses: { type: 'string', required: true },
+                            },
+                        },
+                    },
+                    conflict_count: { type: 'number' },
+                    clean: { type: 'boolean' },
+                    pair_count: { type: 'number' },
+                    ipv4_count: { type: 'number' },
+                    ipv6_count: { type: 'number' },
+                    mixed_family_pairs: { type: 'number' },
+                    note: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderOverlaps(value) }],
+        },
+        async execute(args) {
+            if (args.networks.length < 1) {
+                return { valid: false, reason: 'networks must contain at least one entry' };
+            }
+            if (args.networks.length > OVERLAP_LIMIT) {
+                return { valid: false, reason: `networks is limited to ${OVERLAP_LIMIT} entries per call (got ${args.networks.length})` };
+            }
+            const entries = [];
+            for (let index = 0; index < args.networks.length; index++) {
+                const text = args.networks[index];
+                const entry = resolveMixed(text, index);
+                if (entry === null) {
+                    return { valid: false, reason: `entry #${index + 1} ("${text}") is not a valid IPv4 or IPv6 address or CIDR` };
+                }
+                entries.push(entry);
+            }
+            const conflicts = [];
+            let pairs = 0;
+            let mixedPairs = 0;
+            for (let i = 0; i < entries.length; i++) {
+                for (let j = i + 1; j < entries.length; j++) {
+                    const a = entries[i];
+                    const b = entries[j];
+                    if (a.version !== b.version) {
+                        mixedPairs++;
+                        continue;
+                    }
+                    pairs++;
+                    const start = a.start > b.start ? a.start : b.start;
+                    const end = a.end < b.end ? a.end : b.end;
+                    if (start > end)
+                        continue;
+                    const relation = a.cidr === b.cidr
+                        ? 'duplicate'
+                        : (a.start <= b.start && a.end >= b.end ? 'a_contains_b' : 'b_contains_a');
+                    conflicts.push({
+                        a: a.cidr,
+                        b: b.cidr,
+                        a_index: i,
+                        b_index: j,
+                        relation,
+                        intersection: relation === 'a_contains_b' ? b.cidr : a.cidr,
+                        addresses: (end - start + 1n).toString(),
+                    });
+                }
+            }
+            const ipv4Count = entries.filter((entry) => entry.version === 4).length;
+            const result = {
+                valid: true,
+                conflicts,
+                conflict_count: conflicts.length,
+                clean: conflicts.length === 0,
+                pair_count: pairs,
+                ipv4_count: ipv4Count,
+                ipv6_count: entries.length - ipv4Count,
+                mixed_family_pairs: mixedPairs,
+            };
+            const notes = [];
+            const normalized = entries.filter((entry) => entry.hostBitsSet).length;
+            if (normalized > 0) {
+                notes.push(`${normalized} entry(ies) had host bits set and were compared as their network address`);
+            }
+            if (mixedPairs > 0) {
+                notes.push('IPv4 and IPv6 blocks can never overlap; cross-family pairs were counted but not compared');
+            }
+            if (notes.length > 0)
+                result.note = notes.join('; ');
+            return result;
+        },
+    });
+    return {
+        ipv4_subnet,
+        ipv4_summarize,
+        ipv4_split,
+        ipv4_allocate,
+        ipv4_exclude,
+        ipv4_range,
+        ip_parse,
+        ipv6_subnet,
+        ipv6_summarize,
+        ip_overlaps,
+        ip_match,
+    };
 }
 //# sourceMappingURL=tools.js.map

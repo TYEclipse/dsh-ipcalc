@@ -180,6 +180,63 @@ function bestZeroRun(hextets: number[]): { start: number; len: number } {
   return { start: bestStart, len: bestLen }
 }
 
+/** Merge 128-bit integer ranges into maximal contiguous runs (BigInt mirror of
+ * the IPv4 helper — IPv6 needs the exact type because a /64 exceeds Number). */
+export function mergeV6Ranges(ranges: Array<[bigint, bigint]>): Array<[bigint, bigint]> {
+  const sorted = [...ranges].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  const merged: Array<[bigint, bigint]> = []
+  for (const [start, end] of sorted) {
+    const last = merged[merged.length - 1]
+    if (last !== undefined && start <= last[1] + 1n) {
+      if (end > last[1]) last[1] = end
+    } else {
+      merged.push([start, end])
+    }
+  }
+  return merged
+}
+
+/**
+ * Cover one contiguous IPv6 range with the minimal CIDR list.
+ *
+ * Greedy from the low end: take the largest aligned power-of-two block that
+ * still fits inside the range. That is the classical range→prefix cover and
+ * it is minimal (every block is maximal at its start, so no two neighbours can
+ * be merged into one aligned block).
+ */
+export function v6RangeToCidrs(start: bigint, end: bigint): string[] {
+  const out: string[] = []
+  let cursor = start
+  while (cursor <= end) {
+    let hostBits = 128
+    for (let bits = 128; bits >= 0; bits--) {
+      const size = 1n << BigInt(bits)
+      const aligned = (cursor & (size - 1n)) === 0n
+      if (aligned && cursor + size - 1n <= end) {
+        hostBits = bits
+        break
+      }
+    }
+    const size = 1n << BigInt(hostBits)
+    out.push(`${normalizeV6(bigIntToHextets(cursor))}/${128 - hostBits}`)
+    cursor += size
+  }
+  return out
+}
+
+/** Summarize parsed IPv6 CIDR specs into the minimal covering CIDR list. */
+export function v6SummarizeSpecs(specs: V6CidrSpec[]): string[] {
+  const ranges: Array<[bigint, bigint]> = specs.map((spec) => {
+    const { network, last } = v6RangeOf(spec)
+    return [network, last]
+  })
+  const out: string[] = []
+  for (const [start, end] of mergeV6Ranges(ranges)) {
+    out.push(...v6RangeToCidrs(start, end))
+  }
+  return out
+}
+
 /** Render eight hextets in RFC 5952 canonical form. */
 export function normalizeV6(hextets: number[]): string {
   const pieces = hextets.map((h) => h.toString(16))

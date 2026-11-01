@@ -191,6 +191,12 @@ def main_anchors() -> None:
     for title, pool, cuts in EXCLUDE_SCENARIOS:
         show_plan(title, exclude_anchors(pool, cuts))
 
+    print("══ ipv6_summarize — IPv6 aggregation ═══════════════════════\n")
+    for title, cidrs in SUMMARIZE6_SCENARIOS:
+        show(title, summarize6(cidrs))
+    print("══ ip_overlaps — conflicting pairs ══════════════════════════\n")
+    for title, cidrs in OVERLAP_SCENARIOS:
+        show_overlaps(title, overlaps(cidrs))
     print("✓ all sections printed — reproduce with `python3 test/oracle/anchors.py`\n")
 
 
@@ -452,6 +458,99 @@ def show_plan(title: str, data: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ipv6_summarize / ip_overlaps anchors (v0.5.0)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SUMMARIZE6_SCENARIOS = [
+    ("K1. two /33 halves of 2001:db8::/32 → one /32", ["2001:db8::/33", "2001:db8:8000::/33"]),
+    ("K2. adjacent /48s → one /47", ["2001:db8:0::/48", "2001:db8:1::/48"]),
+    ("K3. nested input folds into the covering block", ["2001:db8::/32", "2001:db8::/48"]),
+    ("K4. two bare addresses → one /127", ["2001:db8::", "2001:db8::1"]),
+    ("K5. the whole IPv6 space", ["::/1", "8000::/1"]),
+    ("K6. a genuine gap keeps two blocks", ["2001:db8:0::/48", "2001:db8:2::/48"]),
+    ("K7. host bits are masked away (normalized /64)", ["2001:db8::1/64"]),
+    ("K8. a /48 cannot tell the 4th hextet apart", ["2001:db8:0:1::/48"]),
+]
+
+OVERLAP_SCENARIOS = [
+    ("L1. /24 contains a /25", ["10.0.0.0/24", "10.0.0.128/25"]),
+    ("L2. two sibling /25s are disjoint", ["10.0.0.0/25", "10.0.0.128/25"]),
+    ("L3. host bits make it a duplicate", ["10.0.0.0/24", "10.0.0.5/24"]),
+    ("L4. IPv4 vs IPv6 can never overlap", ["10.0.0.0/24", "2001:db8::/32"]),
+    ("L5. IPv6 containment (2^80 addresses)", ["2001:db8::/32", "2001:db8:1::/48"]),
+    ("L6. one parent, two disjoint children", ["10.0.0.0/8", "10.0.0.0/16", "10.1.0.0/16"]),
+    ("L7. no conflicts at all", ["192.168.0.0/16", "172.16.0.0/12"]),
+]
+
+
+def summarize6(cidrs):
+    """IPv6 summarization via `ipaddress.collapse_addresses` (stdlib)."""
+    nets = [ipaddress.ip_network(c, strict=False) for c in cidrs]
+    collapsed = [n for n in ipaddress.collapse_addresses(nets)]
+    input_addresses = sum(n.num_addresses for n in nets)
+    covered = sum(n.num_addresses for n in collapsed)
+    return {
+        "input_count": len(nets),
+        "output_count": len(collapsed),
+        "input_addresses": str(input_addresses),
+        "addresses_covered": str(covered),
+        "overlapping_addresses": str(input_addresses - covered),
+        "cidrs": [str(n) for n in collapsed],
+    }
+
+
+def overlaps(cidrs):
+    """Pairwise containment via `ipaddress` — the ruler the plugin is measured by."""
+    nets = [ipaddress.ip_network(c, strict=False) for c in cidrs]
+    conflicts = []
+    pairs = mixed = 0
+    for i in range(len(nets)):
+        for j in range(i + 1, len(nets)):
+            a, b = nets[i], nets[j]
+            if a.version != b.version:
+                mixed += 1
+                continue
+            pairs += 1
+            if not a.overlaps(b):
+                continue
+            if a == b:
+                relation, intersection = "duplicate", a
+            elif b.subnet_of(a):
+                relation, intersection = "a_contains_b", b
+            else:
+                relation, intersection = "b_contains_a", a
+            conflicts.append({
+                "a": str(a),
+                "b": str(b),
+                "a_index": i,
+                "b_index": j,
+                "relation": relation,
+                "intersection": str(intersection),
+                "addresses": str(intersection.num_addresses),
+            })
+    return {
+        "conflict_count": len(conflicts),
+        "clean": not conflicts,
+        "pair_count": pairs,
+        "ipv4_count": sum(1 for n in nets if n.version == 4),
+        "ipv6_count": sum(1 for n in nets if n.version == 6),
+        "mixed_family_pairs": mixed,
+    }, conflicts
+
+
+def show_overlaps(title, data) -> None:
+    result, conflicts = data
+    print(f"── {title} " + "─" * max(0, 62 - len(title)))
+    for key, value in result.items():
+        print(f"   {key} = {value}")
+    for conflict in conflicts:
+        print(f"   pair #{conflict['a_index'] + 1}/#{conflict['b_index'] + 1}:"
+              f" {conflict['a']} vs {conflict['b']} → {conflict['relation']},"
+              f" intersection {conflict['intersection']} ({conflict['addresses']} addresses)")
+    print()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Self-check: the oracle's own anchors must satisfy independent rulers (R61/R63)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -589,7 +688,59 @@ def self_check() -> int:
         expect(data["outside_addresses"] == sum(entry["addresses"] - entry["removed"] for entry in data["excluded"]),
                f"outside_addresses must equal the per-entry outside sum for {pool} − {cuts}")
 
-    # 4) capacity error anchors stay honest
+    # 4) IPv6 summarization: every input must be inside the cover, the cover must
+    #    be un-mergeable (minimality), and set arithmetic must agree on a small case.
+    for title, cidrs in SUMMARIZE6_SCENARIOS:
+        data = summarize6(cidrs)
+        blocks = [ipaddress.ip_network(c) for c in data["cidrs"]]
+        for text in cidrs:
+            net = ipaddress.ip_network(text, strict=False)
+            expect(any(net.subnet_of(block) for block in blocks),
+                   f"{title}: input {net} is not covered by the summarized blocks")
+        for left, right in zip(blocks, blocks[1:]):
+            mergeable = (left.prefixlen == right.prefixlen
+                         and int(right.network_address) == int(left.broadcast_address) + 1)
+            expect(not mergeable, f"{title}: {left} and {right} could be merged — cover is not minimal")
+        expect(data["output_count"] == len(blocks), f"{title}: output_count disagrees with the block list")
+        expect(int(data["input_addresses"]) - int(data["addresses_covered"])
+               == int(data["overlapping_addresses"]), f"{title}: overlap total is inconsistent")
+
+    small = ["::/124", "::10/124", "::20/125"]
+    small_data = summarize6(small)
+    union = set()
+    for text in small:
+        net = ipaddress.ip_network(text, strict=False)
+        union |= set(range(int(net.network_address), int(net.broadcast_address) + 1))
+    listed = set()
+    for text in small_data["cidrs"]:
+        net = ipaddress.ip_network(text)
+        listed |= set(range(int(net.network_address), int(net.broadcast_address) + 1))
+    expect(listed == union, "summarized blocks must cover exactly the union of the inputs")
+    expect(int(small_data["addresses_covered"]) == len(union),
+           "addresses_covered must equal the union size, not the sum of the inputs")
+
+    # 5) ip_overlaps: pair counts and intersections must match ipaddress directly
+    for title, cidrs in OVERLAP_SCENARIOS:
+        result, conflicts = overlaps(cidrs)
+        nets = [ipaddress.ip_network(c, strict=False) for c in cidrs]
+        brute = [(i, j) for i in range(len(nets)) for j in range(i + 1, len(nets))
+                 if nets[i].version == nets[j].version and nets[i].overlaps(nets[j])]
+        expect(result["conflict_count"] == len(brute),
+               f"{title}: conflict_count {result['conflict_count']} != brute force {len(brute)}")
+        for conflict in conflicts:
+            a, b = nets[conflict["a_index"]], nets[conflict["b_index"]]
+            smaller = b if a.supernet_of(b) else a
+            expect(conflict["intersection"] == str(smaller),
+                   f"{title}: intersection must be the smaller block ({smaller})")
+            expect(conflict["addresses"] == str(smaller.num_addresses),
+                   f"{title}: intersection address count is wrong")
+            expect(int(conflict["intersection"].split("/")[1]) >= max(a.prefixlen, b.prefixlen),
+                   f"{title}: an intersection can never be wider than either block")
+    swapped, swapped_conflicts = overlaps(list(reversed(["10.0.0.0/24", "10.0.0.128/25"])))
+    expect(swapped["conflict_count"] == 1 and swapped_conflicts[0]["relation"] == "b_contains_a",
+           "overlap detection must be symmetric under input order")
+
+    # 6) capacity error anchors stay honest
     error = allocate_anchors("10.0.0.0/24", [200, 100])
     expect("error" in error and error["needed"] == 384 and error["parent_addresses"] == 256,
            "the oversized request set must report the real totals")
@@ -600,7 +751,8 @@ def self_check() -> int:
             print(f"   - {message}")
         print(f"   {len(failures)} problem(s)")
         return 1
-    print(f"✅ oracle self-check passed ({checked} placement families, exclude rulers, RFC identities)")
+    print(f"✅ oracle self-check passed ({checked} placement families, exclude rulers, RFC identities,"
+          f" IPv6 summarize minimality, overlap rulers)")
     return 0
 
 

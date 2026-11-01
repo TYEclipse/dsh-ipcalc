@@ -19,8 +19,8 @@ import { assertLossless } from './helpers/lossless-json.ts'
 const tools = buildIpcalcTools()
 
 describe('buildIpcalcTools', () => {
-  it('exposes all nine tools under their canonical names', () => {
-    expect(Object.keys(tools).sort()).toEqual(['ip_match', 'ip_parse', 'ipv4_allocate', 'ipv4_exclude', 'ipv4_range', 'ipv4_split', 'ipv4_subnet', 'ipv4_summarize', 'ipv6_subnet'].sort())
+  it('exposes all eleven tools under their canonical names', () => {
+    expect(Object.keys(tools).sort()).toEqual(['ip_match', 'ip_overlaps', 'ip_parse', 'ipv4_allocate', 'ipv4_exclude', 'ipv4_range', 'ipv4_split', 'ipv4_subnet', 'ipv4_summarize', 'ipv6_subnet', 'ipv6_summarize'].sort())
   })
 
   it('gives every tool a name, description, schema and executable', () => {
