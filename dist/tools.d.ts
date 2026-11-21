@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-ipcalc: eleven pure-math tools exposed to every
+ * Tool definitions for dsh-ipcalc: twelve pure-math tools exposed to every
  * agent via defineTool. Each tool has a strict JSON-schema parameter
  * surface and a compact text renderer. No network I/O happens anywhere.
  *
@@ -18,6 +18,7 @@ export interface ToolSet {
     ip_parse: ToolDefinition;
     ipv6_subnet: ToolDefinition;
     ipv6_summarize: ToolDefinition;
+    ipv6_range: ToolDefinition;
     ip_overlaps: ToolDefinition;
     ip_match: ToolDefinition;
 }
@@ -192,6 +193,17 @@ export interface V6SummarizeResult {
     input_addresses?: string;
     addresses_covered?: string;
     overlapping_addresses?: string;
+    note?: string;
+    reason?: string;
+}
+/** The full output of ipv6_range on success (counts are decimal strings). */
+export interface V6RangeResult {
+    valid: boolean;
+    start?: string;
+    end?: string;
+    cidrs?: string[];
+    count?: number;
+    addresses_covered?: string;
     note?: string;
     reason?: string;
 }

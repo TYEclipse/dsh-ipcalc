@@ -1,5 +1,5 @@
 /**
- * Tool definitions for dsh-ipcalc: eleven pure-math tools exposed to every
+ * Tool definitions for dsh-ipcalc: twelve pure-math tools exposed to every
  * agent via defineTool. Each tool has a strict JSON-schema parameter
  * surface and a compact text renderer. No network I/O happens anywhere.
  *
@@ -7,7 +7,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { classifyV4, formatV4, MAX_REQUEST_HOSTS, PLAN_LIMIT, packBlocks, parseCidr, parseV4, prefixForHosts, rangeToCidrs, splitSpec, subnetOf, subtractRanges, summarizeSpecs, usableHostsForPrefix, } from "./ipv4.js";
-import { bigIntToHextets, normalizeV6, parseV6, parseV6Cidr, v6RangeOf, v6SubnetOf, v6SummarizeSpecs, v6ToBigInt, } from "./ipv6.js";
+import { bigIntToHextets, normalizeV6, parseV6, parseV6Cidr, v6RangeOf, v6RangeToCidrs, v6SubnetOf, v6SummarizeSpecs, v6ToBigInt, } from "./ipv6.js";
 /** Maximum number of subnets ipv4_split returns in one call. */
 export const SPLIT_LIMIT = 256;
 /** Number of subnet lines the ipv4_split renderer prints before eliding. */
@@ -191,6 +191,23 @@ function renderIpMatch(value) {
         return `invalid input: ${result.reason ?? 'unknown error'}`;
     const verdict = result.in_subnet === true ? 'INSIDE' : 'OUTSIDE';
     return `${result.ip} is ${verdict} ${result.cidr} (IPv${result.cidr_version})\n  network ${result.network} – ${result.last}`;
+}
+function renderV6Range(value) {
+    const result = value;
+    if (!result.valid || result.cidrs === undefined) {
+        return `invalid input: ${result.reason ?? 'unknown error'}`;
+    }
+    const shown = result.cidrs.slice(0, PLAN_RENDER_CAP);
+    const lines = [
+        `${result.start} – ${result.end} → ${result.count} CIDR(s) covering ${result.addresses_covered} address(es)`,
+        ...shown.map((cidr) => `  ${cidr}`),
+    ];
+    if (result.cidrs.length > shown.length) {
+        lines.push(`  … and ${result.cidrs.length - shown.length} more`);
+    }
+    if (result.note !== undefined)
+        lines.push(`  note: ${result.note}`);
+    return lines.join('\n');
 }
 function renderV6Summarize(value) {
     const result = value;
@@ -1071,6 +1088,66 @@ export function buildIpcalcTools() {
             return result;
         },
     });
+    const ipv6_range = defineTool({
+        name: 'ipv6_range',
+        description: 'Convert an arbitrary IPv6 address range (start and end address) into the minimal exact '
+            + 'list of CIDR blocks that covers that range — the IPv6 counterpart of ipv4_range and the inverse of '
+            + 'ipv6_summarize. Returns the block list, the block count and the exact number of addresses covered as a '
+            + 'decimal string (a /64 already exceeds Number.MAX_SAFE_INTEGER). Pure local math, no network access. '
+            + 'Use this to turn "2001:db8::1 to 2001:db8::1f" into firewall/ACL prefixes instead of approximating '
+            + 'with an oversized block.',
+        parameters: {
+            start: { type: 'string', required: true, description: 'First address of the range as a bare IPv6 address (no CIDR notation).' },
+            end: { type: 'string', required: true, description: 'Last address of the range as a bare IPv6 address (no CIDR notation).' },
+        },
+        output: {
+            schema: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                    valid: { type: 'boolean', required: true },
+                    start: { type: 'string' },
+                    end: { type: 'string' },
+                    cidrs: { type: 'array', items: { type: 'string' } },
+                    count: { type: 'number' },
+                    addresses_covered: { type: 'string' },
+                    note: { type: 'string' },
+                    reason: { type: 'string' },
+                },
+            },
+            render: (_args, value) => [{ type: 'text', text: renderV6Range(value) }],
+        },
+        async execute(args) {
+            const first = parseV6(args.start.trim());
+            if (first === null) {
+                return { valid: false, reason: `"${args.start.trim()}" is not a valid bare IPv6 address (CIDR notation is not allowed here)` };
+            }
+            const last = parseV6(args.end.trim());
+            if (last === null) {
+                return { valid: false, reason: `"${args.end.trim()}" is not a valid bare IPv6 address (CIDR notation is not allowed here)` };
+            }
+            const firstValue = v6ToBigInt(first.hextets);
+            const lastValue = v6ToBigInt(last.hextets);
+            if (firstValue > lastValue) {
+                return { valid: false, start: first.normalized, end: last.normalized, reason: `start (${first.normalized}) is greater than end (${last.normalized}) — swap the arguments` };
+            }
+            const cidrs = v6RangeToCidrs(firstValue, lastValue);
+            const result = {
+                valid: true,
+                start: first.normalized,
+                end: last.normalized,
+                cidrs,
+                count: cidrs.length,
+                addresses_covered: (lastValue - firstValue + 1n).toString(),
+            };
+            const notes = [];
+            if (firstValue === lastValue)
+                notes.push('single address (one /128)');
+            if (notes.length > 0)
+                result.note = notes.join('; ');
+            return result;
+        },
+    });
     const ip_overlaps = defineTool({
         name: 'ip_overlaps',
         description: 'Check a list of IPv4 and/or IPv6 CIDRs for overlaps: every conflicting pair is reported '
@@ -1201,6 +1278,7 @@ export function buildIpcalcTools() {
         ip_parse,
         ipv6_subnet,
         ipv6_summarize,
+        ipv6_range,
         ip_overlaps,
         ip_match,
     };

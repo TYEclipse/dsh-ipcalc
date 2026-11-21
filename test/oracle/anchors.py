@@ -197,6 +197,9 @@ def main_anchors() -> None:
     print("══ ip_overlaps — conflicting pairs ══════════════════════════\n")
     for title, cidrs in OVERLAP_SCENARIOS:
         show_overlaps(title, overlaps(cidrs))
+    print("══ ipv6_range — range → minimal CIDR cover ══════════════════\n")
+    for title, start_text, end_text in RANGE6_SCENARIOS:
+        show_range6(title, start_text, end_text)
     print("✓ all sections printed — reproduce with `python3 test/oracle/anchors.py`\n")
 
 
@@ -472,6 +475,18 @@ SUMMARIZE6_SCENARIOS = [
     ("K8. a /48 cannot tell the 4th hextet apart", ["2001:db8:0:1::/48"]),
 ]
 
+RANGE6_SCENARIOS = [
+    ("V1. unaligned range inside one /120", "2001:db8::1", "2001:db8::1f"),
+    ("V2. a single address", "2001:db8::5", "2001:db8::5"),
+    ("V3. exactly one /64, spelled as a range", "2001:db8:1::", "2001:db8:1:0:ffff:ffff:ffff:ffff"),
+    ("V4. straddles a /64 boundary (unaligned both ends)", "2001:db8::ffff:ffff:ffff:fff0", "2001:db8:0:1::10"),
+    ("V5. the whole address space", "::", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+    ("V6. two adjacent /65 halves written as one range", "2001:db8::", "2001:db8:0:0:7fff:ffff:ffff:ffff"),
+    ("V7. long unaligned range (49 blocks — renderer elides)", "2001:db8::1", "2001:db8:0:0:1:0:0:1"),
+    ("V8. one whole /120", "fd00::", "fd00::ff"),
+    ("V9. unaligned ends collapse into one /47", "2001:db8:aaaa::", "2001:db8:aaab:ffff:ffff:ffff:ffff:ffff"),
+]
+
 OVERLAP_SCENARIOS = [
     ("L1. /24 contains a /25", ["10.0.0.0/24", "10.0.0.128/25"]),
     ("L2. two sibling /25s are disjoint", ["10.0.0.0/25", "10.0.0.128/25"]),
@@ -497,6 +512,37 @@ def summarize6(cidrs):
         "overlapping_addresses": str(input_addresses - covered),
         "cidrs": [str(n) for n in collapsed],
     }
+
+
+def range6(start_text, end_text) -> dict:
+    """IPv6 range → minimal CIDR cover, via stdlib `ipaddress.summarize_address_range`."""
+    first = ipaddress.IPv6Address(start_text)
+    last = ipaddress.IPv6Address(end_text)
+    blocks = list(ipaddress.summarize_address_range(first, last))
+    data = {
+        "start": str(first),
+        "end": str(last),
+        "count": len(blocks),
+        "addresses_covered": str(int(last) - int(first) + 1),
+        "cidrs": [str(block) for block in blocks],
+    }
+    if first == last:
+        data["note"] = "single address (one /128)"
+    return data
+
+
+def show_range6(title: str, start_text: str, end_text: str) -> None:
+    data = range6(start_text, end_text)
+    print(f"── {title} " + "─" * max(0, 62 - len(title)))
+    print(f"   start = {data['start']}")
+    print(f"   end = {data['end']}")
+    print(f"   count = {data['count']}")
+    print(f"   addresses_covered = {data['addresses_covered']}")
+    for cidr in data["cidrs"]:
+        print(f"     {cidr}")
+    if "note" in data:
+        print(f"   note = {data['note']}")
+    print()
 
 
 def overlaps(cidrs):
@@ -600,6 +646,20 @@ def pack_partition_holds(base: int, parent_size: int, sizes) -> bool:
     return covered == parent_size
 
 
+def can_merge(left, right) -> bool:
+    """True only when two CIDR blocks collapse into ONE aligned supernet.
+
+    Adjacency alone is not enough: `2001:db8::/124` and `2001:db8:0:1::/124`
+    are adjacent but the merged span starts unaligned, so no /123 covers it.
+    The left block must also sit on the doubled block's alignment.
+    """
+    if left.prefixlen != right.prefixlen:
+        return False
+    if int(right.network_address) != int(left.broadcast_address) + 1:
+        return False
+    return int(left.network_address) % (left.num_addresses * 2) == 0
+
+
 def set_free_addresses(pool: str, cuts) -> set:
     """Free addresses of `pool` after removing the cuts, as a plain Python set."""
     inside = set(range(int(ipaddress.ip_network(pool).network_address),
@@ -698,9 +758,8 @@ def self_check() -> int:
             expect(any(net.subnet_of(block) for block in blocks),
                    f"{title}: input {net} is not covered by the summarized blocks")
         for left, right in zip(blocks, blocks[1:]):
-            mergeable = (left.prefixlen == right.prefixlen
-                         and int(right.network_address) == int(left.broadcast_address) + 1)
-            expect(not mergeable, f"{title}: {left} and {right} could be merged — cover is not minimal")
+            expect(not can_merge(left, right),
+                   f"{title}: {left} and {right} could be merged — cover is not minimal")
         expect(data["output_count"] == len(blocks), f"{title}: output_count disagrees with the block list")
         expect(int(data["input_addresses"]) - int(data["addresses_covered"])
                == int(data["overlapping_addresses"]), f"{title}: overlap total is inconsistent")
@@ -740,7 +799,33 @@ def self_check() -> int:
     expect(swapped["conflict_count"] == 1 and swapped_conflicts[0]["relation"] == "b_contains_a",
            "overlap detection must be symmetric under input order")
 
-    # 6) capacity error anchors stay honest
+    # 6) ipv6_range: the cover must start at the range start, be contiguous, end at
+    #    the range end, be un-mergeable (minimal) and re-summarize to itself.
+    for title, start_text, end_text in RANGE6_SCENARIOS:
+        data = range6(start_text, end_text)
+        first = int(ipaddress.IPv6Address(start_text))
+        last = int(ipaddress.IPv6Address(end_text))
+        expect(int(data["addresses_covered"]) == last - first + 1,
+               f"{title}: addresses_covered must be end - start + 1")
+        cursor = first
+        blocks = []
+        for text in data["cidrs"]:
+            block = ipaddress.ip_network(text)
+            expect(block.version == 6, f"{title}: every block must be IPv6")
+            expect(int(block.network_address) == cursor,
+                   f"{title}: blocks must be contiguous and start at the range start")
+            cursor = int(block.broadcast_address) + 1
+            blocks.append(block)
+        expect(cursor - 1 == last, f"{title}: the cover must end exactly at the range end")
+        expect(data["count"] == len(blocks), f"{title}: count disagrees with the block list")
+        for left, right in zip(blocks, blocks[1:]):
+            expect(not can_merge(left, right),
+                   f"{title}: {left} and {right} could be merged — cover is not minimal")
+        expect(len(blocks) <= 256, f"{title}: a range cover never exceeds 2 × 128 blocks")
+        expect(summarize6(data["cidrs"])["cidrs"] == data["cidrs"],
+               f"{title}: summarizing the cover must give the cover back (range and summarize are inverse)")
+
+    # 7) capacity error anchors stay honest
     error = allocate_anchors("10.0.0.0/24", [200, 100])
     expect("error" in error and error["needed"] == 384 and error["parent_addresses"] == 256,
            "the oversized request set must report the real totals")

@@ -2,6 +2,10 @@
 
 > 版本口径：patch 修 bug/补测试｜minor 新增用户可见功能｜major 破坏性变更。安装：`dsh plugin --profile web add github:TYEclipse/dsh-ipcalc`
 
+## [0.6.0] — 2026-11-22
+### Minor · R107
+- [自主进化] R107 新增 ipv6_range：任意 IPv6 区间 → 最小精确 CIDR 列表（ipv4_range 的 IPv6 版）
+
 ## [0.5.0] — 2026-11-02
 ### Minor · R87
 - [自主进化] R87 新增 ipv6_summarize（IPv6 归并）+ ip_overlaps（重叠检测），路线图 B/D 落地

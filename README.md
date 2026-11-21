@@ -17,6 +17,7 @@ subnet arithmetic in their heads (where they frequently get it wrong).
 | `ip_parse` | Validate, normalize (RFC 5952) and classify any IPv4/IPv6 address, including embedded IPv4-in-IPv6 forms |
 | `ipv6_subnet` | Full subnet layout for an IPv6 CIDR: network, first/last host, exact address counts (128-bit BigInt math) and IANA class |
 | `ipv6_summarize` | Reduce a list of IPv6 addresses/prefixes to the minimal covering IPv6 CIDR list (BigInt merge + supernet), with exact decimal-string counts and a total for addresses listed twice |
+| `ipv6_range` | Turn an arbitrary IPv6 address range (`start` … `end`) into the minimal exact CIDR list — the IPv6 counterpart of `ipv4_range`, with exact decimal-string address counts |
 | `ip_overlaps` | **Conflict check**: compare IPv4 and/or IPv6 CIDRs pairwise and report every overlapping pair with its relation (duplicate / containment) and the exact overlap size |
 | `ip_match` | Membership test: is a bare IP (IPv4 or IPv6) inside a CIDR range? Reports the normalized range too |
 
@@ -106,6 +107,14 @@ ipv6_summarize(["2001:db8::/33", "2001:db8:8000::/33"])
 ip_overlaps(["10.0.0.0/24", "10.0.0.128/25", "2001:db8::/32"])
 → 1 conflicting pair(s) of 1 same-family pair(s):
   #1 10.0.0.0/24 vs 10.0.0.128/25 (#2) — a_contains_b, 128 address(es) overlapping
+
+ipv6_range("2001:db8::1", "2001:db8::1f")
+→ 2001:db8::1 – 2001:db8::1f → 5 CIDR(s) covering 31 address(es)
+  2001:db8::1/128
+  2001:db8::2/127
+  2001:db8::4/126
+  2001:db8::8/125
+  2001:db8::10/124
 ```
 
 ## Semantics
@@ -146,6 +155,12 @@ ip_overlaps(["10.0.0.0/24", "10.0.0.128/25", "2001:db8::/32"])
   reports `addresses_covered`, `input_addresses` and `overlapping_addresses` as decimal
   strings so the answer stays exact, and its block list is minimal (no two neighbours
   could be merged).
+- **`ipv6_range` is the exact inverse of `ipv6_summarize`** — the cover starts at
+  `start`, is contiguous, ends at `end`, and re-summarizing it returns the same list.
+  "Minimal" means no two neighbours can be merged, and that is stricter than
+  "adjacent": `2001:db8::ffff:ffff:ffff:fff0/124` and `2001:db8:0:1::/124` sit next to
+  each other and are equally sized, yet the combined span does not start on a /123
+  boundary, so no single /123 covers it — the answer keeps three blocks rather than two.
 - **`ipv4_split` stays aligned and bounded** — host bits are masked away first, the
   target prefix must be longer than the source prefix, and one call returns at most
   256 subnets (ask for a shorter prefix, or split the sub-ranges in turn). `/31`
@@ -185,7 +200,7 @@ MIT
 
 # dsh-ipcalc（中文简介）
 
-面向 DeepSeek Harness 的 IP 与子网数学工具箱，十一个纯本地计算工具，零运行时依赖、无任何网络访问：
+面向 DeepSeek Harness 的 IP 与子网数学工具箱，十二个纯本地计算工具，零运行时依赖、无任何网络访问：
 
 - `ipv4_subnet`：给定 CIDR（支持 `a.b.c.d/前缀`、点分掩码、裸地址）输出完整子网布局——网络号、广播地址、子网掩码、反掩码、可用主机范围与数量、整数形式、IANA 分类（私网/环回/链路本地/CGNAT/文档段/组播/保留段等）。
 - `ipv4_summarize`：把一组 IPv4 地址/网段归并成最小覆盖 CIDR 列表（相邻合并 + 对齐超网）。
@@ -196,6 +211,7 @@ MIT
 - `ip_parse`：校验、规范化（RFC 5952）并分类任意 IPv4/IPv6 地址，识别 `::ffff:a.b.c.d` 内嵌 IPv4 形式。
 - `ipv6_subnet`：IPv6 子网计算——128 位 BigInt 精确算术，输出网络地址、首末可用主机、精确地址数（十进制字符串，超出 2⁵³ 不失真）、RFC 5952 规范形与 IANA 分类；/127 遵循 RFC 6164（点对点两地址均可用）、/128 视为单主机。
 - `ipv6_summarize`：把一组 IPv6 地址/前缀归并为最小覆盖 CIDR 列表（相邻合并 + 对齐超网），地址数以十进制字符串精确返回，并报出「被重复列出的地址数」——IPv6 的地址数早已超出 2⁵³，用数字返回必然失真。
+- `ipv6_range`：把任意 IPv6 地址区间（起始到结束）转成**最小精确 CIDR 列表**——`ipv4_range` 的 IPv6 版、`ipv6_summarize` 的逆运算；地址数以十进制字符串精确返回（一个 /64 就已超出 2⁵³）。「最小」指相邻两块无法再合并，这比「相邻」更严格：`2001:db8::ffff:ffff:ffff:fff0/124` 与 `2001:db8:0:1::/124` 紧挨着且同样大，但合起来的跨度不落在 /123 边界上，所以答案保留三块而不是两块。
 - `ip_overlaps`：把 IPv4 与/或 IPv6 网段两两比对，逐对给出冲突关系（完全相同 / 一方包含另一方）与精确重叠地址数；输入先规范化（`10.0.0.5/24` 会按 `10.0.0.0/24` 比较），跨网族对只计数不比较——IPv4 与 IPv6 永远不可能重叠。
 - `ip_match`：判定裸 IP（v4/v6）是否属于某 CIDR 网段，并给出规范化网段范围；版本错配（v4 对 v6）明确报因，绝不静默出错。
 

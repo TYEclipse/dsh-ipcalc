@@ -3,3 +3,7 @@ node_modules/
 .DS_Store
 dist/*.map
 coverage/
+
+# Python bytecode (the oracle self-check imports anchors.py)
+__pycache__/
+*.pyc
