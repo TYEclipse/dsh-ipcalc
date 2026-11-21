@@ -1,7 +1,7 @@
 # dsh-ipcalc
 
 IP & subnet math toolbox for [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness).
-Eleven pure-math tools — **zero runtime dependencies, no network I/O** — so agents stop doing
+Twelve pure-math tools — **zero runtime dependencies, no network I/O** — so agents stop doing
 subnet arithmetic in their heads (where they frequently get it wrong).
 
 ## Tools
